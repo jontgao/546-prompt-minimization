@@ -1,6 +1,7 @@
 # Prompt Minimization
 
 Python 3.13
+start with TinyLlama/TinyLlama-1.1B-Chat-v1.0
 
 # Dataloader
 Kevin Li
