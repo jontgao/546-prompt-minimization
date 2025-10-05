@@ -1,3 +1,8 @@
 pytorch
 numpy
 matplotlib
+bert-score
+datasets
+huggingface_hub
+openai
+vllm
