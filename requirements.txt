@@ -1,8 +1,9 @@
-pytorch
+torch
 numpy
 matplotlib
 bert-score
 datasets
 huggingface_hub
 openai
-vllm
+vllm # pip install vllm --extra-index-url https://download.pytorch.org/whl/cu128
+flashinfer-python
