@@ -7,3 +7,5 @@ huggingface_hub
 openai
 vllm # pip install vllm --extra-index-url https://download.pytorch.org/whl/cu128
 flashinfer-python
+sentence-transformers # compute_sentence_bert_cosine
+tf-keras              # compute_sentence_bert_cosine
