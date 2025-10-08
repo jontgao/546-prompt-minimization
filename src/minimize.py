@@ -118,7 +118,7 @@ class MultiStageOptimization:
         scoring: List[Tuple[float, Tuple[str, str]]] = []
 
         for prompt, prompt_output in prompts:
-            compression = len(prompt) / len(initial_prompt)
+            compression = compression_score(prompt, initial_prompt)
 
             bert_score = bert_scoring(prompt_output, initial_prompt_output)
 
