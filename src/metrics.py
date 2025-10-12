@@ -64,4 +64,4 @@ def compression_score_tokens(output, expected_output, tokenizer):
     if len(output_tokens) == 0:
         return float('inf')
 
-    return len(expected_tokens) / len(output_tokens)
+    return len(output_tokens) / len(expected_tokens)
