@@ -11,6 +11,8 @@ tests/compare*/
 analysis/
 plot.png
 
+data/*.jsonl
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

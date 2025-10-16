@@ -1,0 +1,18 @@
+{
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful, respectful, and honest assistant. Always answer as helpfully as possible."
+      },
+      {
+        "role": "user",
+        "content": ""
+      }
+    ],
+    "max_new_tokens": 128,
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "top_k": 50,
+    "stream": false,
+    "raw": false
+  }
