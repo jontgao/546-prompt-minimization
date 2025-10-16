@@ -7,17 +7,7 @@ from vllm import LLM, SamplingParams
 
 DEFAULT_LLM = 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
 
-try:
-    from metrics import compression_score
-except ImportError:
-    def compression_score(prompt: str, initial_prompt: str) -> float:
-        return len(prompt) / len(initial_prompt)
-
-try:
-    from metrics import bert_scoring
-except ImportError:
-    def bert_scoring(a: str, b: str) -> float:
-        return 0
+from metrics import BERTScoreScorer, CompressionLengthScorer
 
 
 class MultiStageOptimization:
@@ -28,7 +18,9 @@ class MultiStageOptimization:
 
         self.sampling_params = SamplingParams(temperature=config.temperature, top_p=config.top_p)
 
+        self.bert_scorer = BERTScoreScorer()
         self.bert_score_weight = config.bert_score_weight
+        self.compression_scorer = CompressionLengthScorer()
         self.compression_weight = config.compression_weight
         self.top_n = config.top_n
 
@@ -118,9 +110,9 @@ class MultiStageOptimization:
         scoring: List[Tuple[float, Tuple[str, str]]] = []
 
         for prompt, prompt_output in prompts:
-            compression = compression_score(prompt, initial_prompt)
+            compression = self.compression_scorer.compute_score(prompt, initial_prompt)
 
-            bert_score = bert_scoring(prompt_output, initial_prompt_output)
+            bert_score = self.bert_scorer.compute_score(prompt_output, initial_prompt_output)
 
             total_score = (1 - bert_score) * self.bert_score_weight + compression * self.compression_weight
 
