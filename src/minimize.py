@@ -7,7 +7,7 @@ from vllm import LLM, SamplingParams
 
 DEFAULT_LLM = 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
 
-from metrics import BERTScoreScorer, CompressionLengthScorer
+from src.metrics import BERTScoreScorer, CompressionLengthScorer
 
 
 class MultiStageOptimization:

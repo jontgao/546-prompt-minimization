@@ -42,11 +42,12 @@ class SentenceBERTCosineScorer(Scorer):
         from sentence_transformers import SentenceTransformer
         from sklearn.metrics.pairwise import cosine_similarity
         super().__init__(scorer=SentenceTransformer(model))
+        self._cos = cosine_similarity
 
     def compute_score(self, output, expected_output):
         cand_emb = self.scorer.encode(output)
         ref_emb = self.scorer.encode(expected_output)
-        scores = cosine_similarity(cand_emb, ref_emb)
+        scores = self._cos(cand_emb, ref_emb)
         return scores
 
 ###############################################################################
