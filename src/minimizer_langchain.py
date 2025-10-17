@@ -4,7 +4,10 @@ from langchain_core.runnables import RunnableLambda, RunnableSequence
 # REQUIRES mistral (or other llm) running locally on a ollama server, https://ollama.com/download
 # TODO: include output in system prompt, genereate multiple candidate prompts with .batch()
 
-from metrics import bert_scoring, compression_score
+from metrics import BERTScoreScorer, CompressionLengthScorer
+
+bert_scorer = BERTScoreScorer()
+compression_scorer = CompressionLengthScorer()
 
 minimizer_llm = ChatOllama(model="mistral", temperature=0, num_predict=200)
 tester_llm = ChatOllama(model="mistral", temperature=0, num_predict=200)
@@ -42,8 +45,8 @@ def test_minimized_prompt(inputs: dict):
 
 # Evaluate new prompt and output.
 def evaluate(inputs: dict, bert_w=0.5, comp_w=0.5):
-    comp_score = compression_score(inputs["new_prompt"], inputs["original_prompt"])
-    bert_score = bert_scoring([inputs["new_output"]], [inputs["original_output"]])[0].item()
+    comp_score = compression_scorer.compute_score(inputs["new_prompt"], inputs["original_prompt"])
+    bert_score = bert_scorer.compute_score([inputs["new_output"]], [inputs["original_output"]])[0].item()
     total_score = (1-bert_score) * bert_w + comp_score * comp_w
 
     return {**inputs, "score": total_score, "bert_score": bert_score, "compression_score": comp_score}
