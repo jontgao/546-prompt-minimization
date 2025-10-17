@@ -14,9 +14,9 @@ class MultiStageOptimization:
     def __init__(self, config):
         self.llm = LLM(model=config.model, seed=config.seed)
 
-        self.tokenizer = AutoTokenizer.from_pretrained(config.model)
+        self.config = config
 
-        self.sampling_params = SamplingParams(temperature=config.temperature, top_p=config.top_p)
+        self.tokenizer = AutoTokenizer.from_pretrained(config.model)
 
         self.bert_scorer = BERTScoreScorer()
         self.bert_score_weight = config.bert_score_weight
@@ -31,6 +31,16 @@ class MultiStageOptimization:
     def __call__(self, initial_prompt: str, initial_prompt_output: str):
         prompts: List[Tuple[str, float]] = []
 
+
+        initial_prompt_output_encoded = self.llm.encode(initial_prompt_output)
+
+        max_output_length = min(len(initial_prompt_output_encoded), self.config.max_token_length)
+
+        self.sampling_params = SamplingParams(temperature=self.config.temperature, top_p=self.config.top_p, max_tokens=max_output_length)
+
+        print("Using max token length", max_output_length)
+
+
         current_best_prompts: List[Tuple[float, Tuple[str, str]]] = [
             (self.compression_weight, (initial_prompt, initial_prompt_output))]
 
@@ -39,11 +49,11 @@ class MultiStageOptimization:
 
             prompt_outputs = self.stage_one(current_best_prompts, initial_prompt, initial_prompt_output)
 
-            print(prompt_outputs)
+            print("Prompt outputs:", prompt_outputs)
 
             scores = self.score(prompt_outputs, initial_prompt, initial_prompt_output)
 
-            print(scores)
+            print("Scored outputs:", scores)
 
             for p in scores:
                 heapq.heappush(prompts, p)
@@ -128,11 +138,12 @@ if __name__ == '__main__':
         temperature = 0.9
         top_p = 0.95
         seed = 0
-        bert_score_weight = 1.0
+        bert_score_weight = 10.0
         compression_weight = 1.0
         num_iterations = 10
         top_n = 1
-        batch_size = 10
+        batch_size = 100
+        max_token_length = 10000
 
     temp = MultiStageOptimization(Config())
 
