@@ -107,12 +107,13 @@ class MultiStageOptimization:
 
     def score(self, prompts: List[Tuple[str, str]], initial_prompt: str, initial_prompt_output: str) -> List[
         Tuple[float, Tuple[str, str]]]:
+        # TODO: vectorize
         scoring: List[Tuple[float, Tuple[str, str]]] = []
 
         for prompt, prompt_output in prompts:
             compression = self.compression_scorer.compute_score(prompt, initial_prompt)
 
-            bert_score = self.bert_scorer.compute_score(prompt_output, initial_prompt_output)
+            bert_score = self.bert_scorer.compute_score([prompt_output], [initial_prompt_output])[0]
 
             total_score = (1 - bert_score) * self.bert_score_weight + compression * self.compression_weight
 
