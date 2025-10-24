@@ -12,10 +12,10 @@ class Scorer():
         Compute score between actual and expected output.
 
         This is a wrapper function to handle different input types. Permissible input types are:
-            1. Single string for both output and expected_output
-                Returns score between the two strings
-            2. List of strings for both output and expected_output (of same length)
+            1. List of strings for both output and expected_output (of same length)
                 Returns list of scores for each corresponding pair
+            2. Single string for both output and expected_output
+                Returns score between the two strings
             3. List of strings for output and single string for expected_output
                 Returns list of scores for each output against the single expected_output
         
@@ -23,13 +23,13 @@ class Scorer():
         :param expected_output: List of strings OR single string
         :returns: tensor of floats, each representing the score for the corresponding pair of output and expected_output
         """
-        if isinstance(output, str) and isinstance(expected_output, str):
-            return self._compute_score_output_expected_pairs([output], [expected_output])[0]
-        elif isinstance(output, list) and isinstance(expected_output, list):
+        if isinstance(output, list) and isinstance(expected_output, list):
             assert len(output) == len(expected_output), "Output and expected_output lists must be of the same length."
             return self._compute_score_output_expected_pairs(output, expected_output)
+        elif isinstance(output, str) and isinstance(expected_output, str):
+            return self._compute_score_output_expected_pairs([output], [expected_output])[0]
         elif isinstance(output, list) and isinstance(expected_output, str):
-            return self._compute_score_mult_outputs_one_expected(output, expected_output)
+            return self._compute_score_output_expected_pairs(output, [expected_output] * len(output))
         else:
             raise TypeError("Types of output and expected_output not supported.")
 
@@ -43,17 +43,6 @@ class Scorer():
         """
         assert len(outputs) == len(expected_outputs), "Output and expected_output lists must be of the same length."
         raise NotImplementedError("Subclasses must implement this method.")
-    
-    def _compute_score_mult_outputs_one_expected(self, outputs, expected_output):
-        """
-        Compute score between multiple actual outputs and one expected output.
-        
-        :param outputs: List of strings
-        :param expected_output: single string
-        :returns: tensor of floats, each representing the score for each output and expected_output
-        """
-        repeated_expected = [expected_output] * len(outputs)
-        return self.compute_score(outputs, repeated_expected)
 
 ###############################################################################
 # Semantic Similarity Metrics
@@ -67,13 +56,13 @@ class BERTScoreScorer(Scorer):
         _, _, F1 = self.scorer.score(outputs, expected_outputs)
         return F1.tolist()
 
-# class BLEURTScorer(Scorer):
-#     def __init__(self, checkpoint='BLEURT-20'):
-#         from bleurt import score as bleurt_score
-#         super().__init__(scorer=bleurt_score.BleurtScorer(checkpoint=checkpoint))
+class BLEURTScorer(Scorer):
+    def __init__(self, checkpoint='BLEURT-20'):
+        from bleurt import score as bleurt_score
+        super().__init__(scorer=bleurt_score.BleurtScorer(checkpoint=checkpoint))
 
-#     def _compute_score_output_expected_pairs(self, outputs, expected_outputs):
-#         return self.scorer.score(references=expected_output, candidates=output)
+    def _compute_score_output_expected_pairs(self, outputs, expected_outputs):
+        return self.scorer.score(references=expected_outputs, candidates=outputs)
 
 class SentenceBERTCosineScorer(Scorer):
     def __init__(self, model='all-MiniLM-L6-v2'):
@@ -110,8 +99,7 @@ class CompressionTokenScorer(Scorer):
 
 if __name__ == '__main__':
     from transformers import AutoTokenizer
-    scorers = [BERTScoreScorer(), SentenceBERTCosineScorer(), CompressionLengthScorer(), CompressionTokenScorer(tokenizer=AutoTokenizer.from_pretrained('TinyLlama/TinyLlama-1.1B-Chat-v1.0'))]
-
+    scorers = [BERTScoreScorer(), BLEURTScorer(), SentenceBERTCosineScorer(), CompressionLengthScorer(), CompressionTokenScorer(tokenizer=AutoTokenizer.from_pretrained('TinyLlama/TinyLlama-1.1B-Chat-v1.0'))]
     for scorer in scorers:
         output = ["The cat sat on the mat.", "A quick brown fox jumps over the lazy dog."]
         expected_output = ["The cat is sitting on the mat.", "A fast brown fox leaps over a lazy dog."]
