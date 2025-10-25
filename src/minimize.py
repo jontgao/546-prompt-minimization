@@ -17,7 +17,10 @@ DEFAULT_LLM = 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
 
 class MultiStageOptimization:
     def __init__(self, config):
-        self.llm = LLM(model=config.model, seed=config.seed, tensor_parallel_size=torch.cuda.device_count())
+        self.llm = LLM(model=config.model, seed=config.seed,
+                       tensor_parallel_size=torch.cuda.device_count(),
+                       gpu_memory_utilization=0.85,
+                       enable_prefix_caching=True)
 
         self.config = config
 
@@ -41,11 +44,11 @@ class MultiStageOptimization:
                 'initial_prompt': initial_prompt,
                 'initial_output': initial_prompt_output,
                 'tokenizer_model': self.config.model
-            }, f)
+            }, f, indent=4)
 
     def save_events(self, save_dir, events: List[Dict[str, Union[str, float]]]):
         with open(save_dir / 'events.json', 'w') as f:
-            json.dump(events, f)
+            json.dump(events, f, indent=4)
 
     def __call__(self, initial_prompt: str, initial_prompt_output: str):
         prompts: List[Tuple[str, float]] = []
@@ -78,7 +81,7 @@ class MultiStageOptimization:
                 'prompt': initial_prompt,
                 'output': initial_prompt_output,
                 'score': self.compression_weight,
-                'origin': current_best_prompts[0][1][0]
+                'origin': None
             }
 
         ]
@@ -88,7 +91,7 @@ class MultiStageOptimization:
         for iteration in range(self.num_iterations):
             print(current_best_prompts)
 
-            prompt_outputs = self.stage_one(current_best_prompts, initial_prompt, initial_prompt_output)
+            prompt_outputs, seeds = self.stage_one(current_best_prompts, initial_prompt, initial_prompt_output)
 
             print("Prompt outputs:", prompt_outputs)
 
@@ -96,13 +99,13 @@ class MultiStageOptimization:
 
             print("Scored outputs:", scores)
 
-            for score_, (prompt_, prompt_output_) in scores:
+            for (score_, (prompt_, prompt_output_)), seed in zip(scores, seeds):
                 events.append({
                     'iteration': iteration + 1,
                     'prompt': prompt_,
                     'output': prompt_output_,
                     'score': score_,
-                    'origin': current_best_prompts[0][1][0]
+                    'origin': seed
                 })
             self.save_events(save_folder, events)
 
@@ -116,24 +119,27 @@ class MultiStageOptimization:
             print(f"Using the following prompts as top, score:{best[0]}, prompt:{best[1][0]}")
 
     def stage_one(self, prompts: List[Tuple[float, Tuple[str, str]]], initial_prompt: str,
-                  initial_prompt_output: str) -> List[
-        Tuple[str, str]]:
+                  initial_prompt_output: str) -> Tuple[List[Tuple[str, str]], List[str]]:
 
         system_prompt = (f"You are trying to generate minimal prompt that would generate the exact same result as the "
                          f"the following prompt. You are trying to minimize compression ratio length of the new "
                          f"prompt and the original prompt and the BERT Score which is the semantic "
                          f"similarity"
                          f"\nPrompt: {initial_prompt}"
-                         f"\nAnswer: {initial_prompt_output}"
+                         f"\nPrompt Output: {initial_prompt_output}"
                          f"\nThe user will be providing the seed output and the score associated with that prompt and "
                          f"you want to ensure that the prompts that you provide are better than the previous ones. Do "
                          f"not add extra text except the output prompt only. ONLY output the prompt")
         return self.generate(prompts, system_prompt)
 
-    def generate(self, prompts: List[Tuple[float, Tuple[str, str]]], system_prompt: str) -> List[Tuple[str, str]]:
+    def generate(self, prompts: List[Tuple[float, Tuple[str, str]]], system_prompt: str) -> Tuple[List[Tuple[str, str]], List[str]]:
         messages = []
 
-        for score, (prompt, prompt_output) in prompts:
+        weights = [s for s, _ in prompts]
+
+        prompts_to_use = random.choices(prompts, k=self.batch_size, weights=weights)
+
+        for score, (prompt, prompt_output) in prompts_to_use:
             text = [
                 {
                     'role': 'system', 'content': system_prompt,
@@ -152,10 +158,7 @@ class MultiStageOptimization:
 
             messages.append(text)
 
-        if len(messages) < self.batch_size:
-            outputs = random.choices(messages, k=self.batch_size - len(messages))
-
-            messages.extend(outputs)
+        prompt_seed = [seed for _, (seed, _) in prompts_to_use]
 
         outputs = self.llm.generate(messages, self.sampling_params)
 
@@ -163,8 +166,8 @@ class MultiStageOptimization:
 
         new_prompt_outputs = self.llm.generate(new_prompts, self.sampling_params)
 
-        return [(new_prompt, new_outut.outputs[0].text) for new_prompt, new_outut in
-                zip(new_prompts, new_prompt_outputs)]
+        return [(new_prompt, new_output.outputs[0].text) for new_prompt, new_output in
+                zip(new_prompts, new_prompt_outputs)], prompt_seed
 
     def score(self, prompts: List[Tuple[str, str]], initial_prompt: str, initial_prompt_output: str) -> List[
         Tuple[float, Tuple[str, str]]]:
@@ -188,15 +191,16 @@ class MultiStageOptimization:
 
 if __name__ == '__main__':
     class Config:
-        model = DEFAULT_LLM
+        model = 'Qwen/Qwen2.5-32B-Instruct-AWQ'
+        # model = DEFAULT_LLM
         temperature = 0.9
         top_p = 0.95
         seed = 0
         bert_score_weight = 10.0
         compression_weight = 1.0
-        num_iterations = 10
-        top_n = 1
-        batch_size = 100
+        num_iterations = 30
+        top_n = 10
+        batch_size = 200
         max_token_length = 10000
         run_folder = 'runs'
 
