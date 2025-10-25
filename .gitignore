@@ -1,3 +1,7 @@
+# Run configs
+runs/
+
+
 outcmaes/
 all-logs/
 plot*/
