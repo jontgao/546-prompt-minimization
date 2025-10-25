@@ -42,11 +42,12 @@ class MultiStageOptimization:
 
         self.base_folder = Path(config.run_folder)
 
-    def save_meta(self, save_dir, initial_prompt: str, initial_prompt_output):
+    def save_meta(self, save_dir, initial_prompt: str, initial_prompt_output, system_prompt):
         with open(save_dir / 'meta.json', 'w') as f:
             json.dump({
                 'initial_prompt': initial_prompt,
                 'initial_output': initial_prompt_output,
+                'system_prompt': system_prompt,
                 'tokenizer_model': self.config.model
             }, f, indent=4)
 
@@ -65,7 +66,9 @@ class MultiStageOptimization:
 
         save_folder.mkdir(parents=True, exist_ok=True)
 
-        self.save_meta(save_folder, initial_prompt, initial_prompt_output)
+        system_prompt = self.generate_system_prompt(initial_prompt, initial_prompt_output)
+
+        self.save_meta(save_folder, initial_prompt, initial_prompt_output , system_prompt)
 
         initial_prompt_output_encoded = self.tokenizer.encode(initial_prompt_output)
 
@@ -95,7 +98,7 @@ class MultiStageOptimization:
         for iteration in range(self.num_iterations):
             print(current_best_prompts)
 
-            prompt_outputs, seeds = self.stage_one(current_best_prompts, initial_prompt, initial_prompt_output)
+            prompt_outputs, seeds = self.stage_one(current_best_prompts, system_prompt)
 
             print("Prompt outputs:", prompt_outputs)
 
@@ -122,18 +125,73 @@ class MultiStageOptimization:
             best = current_best_prompts[0]
             print(f"Using the following prompts as top, score:{best[0]}, prompt:{best[1][0]}")
 
-    def stage_one(self, prompts: List[Tuple[float, Tuple[str, str]]], initial_prompt: str,
-                  initial_prompt_output: str) -> Tuple[List[Tuple[str, str]], List[str]]:
+    def generate_system_prompt(self, initial_prompt: str,
+                  initial_prompt_output: str) -> str:
+        system_prompt = fr"""You are a PRECISION prompt-compression specialist. Your job: produce a new,
+significantly shorter prompt that, when given to the same LLM under the
+same generation settings, will produce the EXACT SAME textual output as the
+original prompt did. Be concise, deterministic, and conservative: you may
+remove only words or structure that provably do not change the output.
 
-        system_prompt = (f"You are trying to generate minimal prompt that would generate the exact same result as the "
-                         f"the following prompt. You are trying to minimize compression ratio length of the new "
-                         f"prompt and the original prompt and the BERT Score which is the semantic "
-                         f"similarity"
-                         f"\nPrompt: {initial_prompt}"
-                         f"\nPrompt Output: {initial_prompt_output}"
-                         f"\nThe user will be providing the seed output and the score associated with that prompt and "
-                         f"you want to ensure that the prompts that you provide are better than the previous ones. Do "
-                         f"not add extra text except the output prompt only. ONLY output the prompt")
+CONSTRAINTS (must follow all):
+1) ONLY output the NEW PROMPT TEXT and NOTHING ELSE — no explanation, no quotes,
+no extra whitespace, no metadata, no JSON, no commentary. If you cannot compress
+without changing the output, output the ORIGINAL PROMPT verbatim.
+2) Preserve all critical facts: named entities, numbers, punctuation that affect
+parsing (dates, scores, code tokens). If the original answer depends on a specific
+format (e.g., list, table, JSON), preserve the format instruction.
+3) Minimize tokens: prefer shorter synonyms, remove filler, eliminate redundancy,
+and collapse multi-sentence instructions into a single concise instruction.
+4) Do not introduce new assumptions, unspecified defaults, or inventions.
+5) Do not use placeholders (e.g., [DETAILS]) unless they are provably inert for the output.
+
+SCORING HEURISTICS (informational — you do not compute these):
+- Fidelity: preserve semantics; any change that could alter the generated output is forbidden.
+- Brevity: shorter prompts are better when fidelity is preserved.
+- Clarity: keep the prompt unambiguous for the LLM.
+
+HOW TO COMPRESS (concrete techniques):
+- Remove polite framing ('please', 'kindly') and meta commentary ('I want you to...').
+- Convert multi-step prose into compact imperative instructions (e.g., 'Write a 3-sentence summary' -> '3-sentence summary').
+- Replace verbose qualifiers with compact explicit constraints ('in no more than 50 words' -> '≤50 words').
+- Merge context into one short clause; move examples only if essential.
+
+EXACT TASK CONTEXT:
+ORIGINAL PROMPT: {initial_prompt}
+ORIGINAL PROMPT OUTPUT (for fidelity reference): {initial_prompt_output}
+
+OUTPUT RULE (critical):
+- If you are absolutely certain the new prompt will produce the same output, output that new prompt only.
+- If you are uncertain or cannot guarantee exact parity, output the ORIGINAL PROMPT exactly as given.
+
+ONLY OUTPUT THE PROMPT — DO NOT ADD ANYTHING ELSE.
+
+FEW-SHOT EXAMPLES (for conditioning — do not print these examples in final output):
+
+[Example 1]
+ORIGINAL PROMPT: Please write a very short (2–3 sentence) summary of the plot of "Romeo and Juliet", focusing on the main events and the motivations of the principal characters. Be concise and do not include quotations from the play.
+ORIGINAL PROMPT OUTPUT: Romeo and Juliet is a tragedy about two young lovers from feuding families in Verona. Their secret marriage and attempts to reconcile their families lead to misunderstandings and a sequence of events that ends in both their deaths—driven by love, impulsiveness, and family honor.
+COMPRESSED PROMPT (valid): 2–3 sentence summary of Romeo & Juliet focusing on main events and principal motivations; no quotations.
+
+[Example 2]
+ORIGINAL PROMPT: I want a JSON object listing the teams, the final score, and the winner from the match where Team A beat Team B 3-1 on 2021-05-06. The JSON keys should be "teams", "score", and "winner" in that exact order.
+ORIGINAL PROMPT OUTPUT: {{"teams": ["Team A", "Team B"], "score": "3-1", "winner": "Team A"}}
+COMPRESSED PROMPT (valid): Return JSON with keys ["teams","score","winner"] in that order for the 2021-05-06 Team A vs Team B match (3-1).
+
+[Example 3 — do not compress]
+ORIGINAL PROMPT: Translate the following legal clause into plain English but do not change its legal meaning or remove any conditions: "If the Lessee fails to pay rent within thirty (30) days of written notice, the Lessor may, at its option, terminate this lease." Use formal legal phrasing but simpler language.
+ORIGINAL PROMPT OUTPUT: If the tenant doesn't pay rent within thirty (30) days after written notice, the landlord can choose to end the lease. (Retains legal force and conditions.)
+COMPRESSED PROMPT (invalid — must return original): Paraphrase clause: tenant nonpayment after 30 days → landlord may end lease.
+
+[Example 4]
+ORIGINAL PROMPT: Who was Kyle Van Zyl playing against when he scored 36 of his team's 61 points?
+ORIGINAL PROMPT OUTPUT: He was playing against Boland U21.
+COMPRESSED PROMPT (valid conservative): Opponent when Kyle Van Zyl scored 36 of his team's 61 points?"""
+
+        return system_prompt
+
+    def stage_one(self, prompts: List[Tuple[float, Tuple[str, str]]], system_prompt: str) -> Tuple[List[Tuple[str, str]], List[str]]:
+
         return self.generate(prompts, system_prompt)
 
     def generate(self, prompts: List[Tuple[float, Tuple[str, str]]], system_prompt: str) -> Tuple[List[Tuple[str, str]], List[str]]:
@@ -150,7 +208,11 @@ class MultiStageOptimization:
                 },
                 {
                     'role': 'user',
-                    'content': f'Prompt to optimize: {prompt} which generated "{prompt_output}" and a score of {score}.\n\nNew prompt: ',
+                    'content': f'''For context on previous iterations, the following seed prompt was used
+SEED PROMPT: {prompt} 
+SEED PROMPT OUTPUT: {prompt_output}
+SEED PROMPT SCORE: {score} 
+''',
                 }
             ]
 
@@ -166,11 +228,11 @@ class MultiStageOptimization:
 
         outputs = self.llm.generate(messages, self.sampling_params)
 
-        new_prompts = [output.outputs[0].text for output in outputs]
+        new_prompts = [output.outputs[0].text.strip() for output in outputs]
 
         new_prompt_outputs = self.llm.generate(new_prompts, self.sampling_params)
 
-        return [(new_prompt, new_output.outputs[0].text) for new_prompt, new_output in
+        return [(new_prompt, new_output.outputs[0].text.strip()) for new_prompt, new_output in
                 zip(new_prompts, new_prompt_outputs)], prompt_seed
 
     def score(self, prompts: List[Tuple[str, str]], initial_prompt: str, initial_prompt_output: str) -> List[
