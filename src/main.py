@@ -6,6 +6,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Minimization parser')
 
     parser.add_argument('--dataset', type=str, choices=[''], help='Datasets available')
+    parser.add_argument('--run_folder', type=str, default='runs', help='Datasets available')
     parser.add_argument('--model', type=str, default='TinyLlama/TinyLlama-1.1B-Chat-v1.0',
                         help='Model to use for the inference')
     parser.add_argument('--temp', type=float, default=1.0, help='Temperature to use for the inference')

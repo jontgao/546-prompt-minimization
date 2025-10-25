@@ -1,19 +1,23 @@
 import heapq
-import numpy as np
+import json
 import random
-from typing import Tuple, List
+from datetime import datetime
+from pathlib import Path
+from typing import Tuple, List, Dict, Union
 
+import numpy as np
+import torch
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
-DEFAULT_LLM = 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
-
 from metrics import BERTScoreScorer, CompressionLengthScorer
+
+DEFAULT_LLM = 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
 
 
 class MultiStageOptimization:
     def __init__(self, config):
-        self.llm = LLM(model=config.model, seed=config.seed)
+        self.llm = LLM(model=config.model, seed=config.seed, tensor_parallel_size=torch.cuda.device_count())
 
         self.config = config
 
@@ -29,23 +33,59 @@ class MultiStageOptimization:
 
         self.batch_size = config.batch_size
 
+        self.base_folder = Path(config.run_folder)
+
+    def save_meta(self, save_dir, initial_prompt: str, initial_prompt_output):
+        with open(save_dir / 'meta.json', 'w') as f:
+            json.dump({
+                'initial_prompt': initial_prompt,
+                'initial_output': initial_prompt_output,
+                'tokenizer_model': self.config.model
+            }, f)
+
+    def save_events(self, save_dir, events: List[Dict[str, Union[str, float]]]):
+        with open(save_dir / 'events.json', 'w') as f:
+            json.dump(events, f)
+
     def __call__(self, initial_prompt: str, initial_prompt_output: str):
         prompts: List[Tuple[str, float]] = []
 
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        run_hash = str(hash(initial_prompt + '_' + initial_prompt_output))
+        run_name = f'run-{timestamp}-{run_hash}'
 
-        initial_prompt_output_encoded = self.llm.encode(initial_prompt_output)
+        save_folder = self.base_folder / run_name
+
+        save_folder.mkdir(parents=True, exist_ok=True)
+
+        self.save_meta(save_folder, initial_prompt, initial_prompt_output)
+
+        initial_prompt_output_encoded = self.tokenizer.encode(initial_prompt_output)
 
         max_output_length = min(len(initial_prompt_output_encoded), self.config.max_token_length)
 
-        self.sampling_params = SamplingParams(temperature=self.config.temperature, top_p=self.config.top_p, max_tokens=max_output_length)
+        self.sampling_params = SamplingParams(temperature=self.config.temperature, top_p=self.config.top_p,
+                                              max_tokens=max_output_length)
 
         print("Using max token length", max_output_length)
-
 
         current_best_prompts: List[Tuple[float, Tuple[str, str]]] = [
             (self.compression_weight, (initial_prompt, initial_prompt_output))]
 
-        for _ in range(self.num_iterations):
+        events = [
+            {
+                'iteration': 0,
+                'prompt': initial_prompt,
+                'output': initial_prompt_output,
+                'score': self.compression_weight,
+                'origin': current_best_prompts[0][1][0]
+            }
+
+        ]
+
+        self.save_events(save_folder, events)
+
+        for iteration in range(self.num_iterations):
             print(current_best_prompts)
 
             prompt_outputs = self.stage_one(current_best_prompts, initial_prompt, initial_prompt_output)
@@ -55,6 +95,16 @@ class MultiStageOptimization:
             scores = self.score(prompt_outputs, initial_prompt, initial_prompt_output)
 
             print("Scored outputs:", scores)
+
+            for score_, (prompt_, prompt_output_) in scores:
+                events.append({
+                    'iteration': iteration + 1,
+                    'prompt': prompt_,
+                    'output': prompt_output_,
+                    'score': score_,
+                    'origin': current_best_prompts[0][1][0]
+                })
+            self.save_events(save_folder, events)
 
             for p in scores:
                 heapq.heappush(prompts, p)
@@ -126,7 +176,7 @@ class MultiStageOptimization:
         total_score = (((1 - bert_score) * self.bert_score_weight) + (compression * self.compression_weight)).tolist()
 
         scoring = list(zip(total_score, prompts))
-        
+
         # scoring: List[Tuple[float, Tuple[str, str]]]
         # assert len(scoring) == len(prompts)
         # assert all(isinstance(s[0], float) for s in scoring)
@@ -148,6 +198,8 @@ if __name__ == '__main__':
         top_n = 1
         batch_size = 100
         max_token_length = 10000
+        run_folder = 'runs'
+
 
     temp = MultiStageOptimization(Config())
 
