@@ -1,4 +1,5 @@
 import heapq
+import numpy as np
 import random
 from typing import Tuple, List
 
@@ -117,17 +118,20 @@ class MultiStageOptimization:
 
     def score(self, prompts: List[Tuple[str, str]], initial_prompt: str, initial_prompt_output: str) -> List[
         Tuple[float, Tuple[str, str]]]:
-        # TODO: vectorize
-        scoring: List[Tuple[float, Tuple[str, str]]] = []
+        prompt_inputs, prompt_outputs = zip(*prompts)
+        prompt_inputs, prompt_outputs = list(prompt_inputs), list(prompt_outputs)
 
-        for prompt, prompt_output in prompts:
-            compression = self.compression_scorer.compute_score(prompt, initial_prompt)
+        compression = np.array(self.compression_scorer.compute_score(prompt_inputs, initial_prompt))
+        bert_score = np.array(self.bert_scorer.compute_score(prompt_outputs, initial_prompt_output))
+        total_score = (((1 - bert_score) * self.bert_score_weight) + (compression * self.compression_weight)).tolist()
 
-            bert_score = self.bert_scorer.compute_score([prompt_output], [initial_prompt_output])[0]
-
-            total_score = (1 - bert_score) * self.bert_score_weight + compression * self.compression_weight
-
-            scoring.append((total_score, (prompt, prompt_output)))
+        scoring = list(zip(total_score, prompts))
+        
+        # scoring: List[Tuple[float, Tuple[str, str]]]
+        # assert len(scoring) == len(prompts)
+        # assert all(isinstance(s[0], float) for s in scoring)
+        # assert all(isinstance(s[1], tuple) and len(s[1]) == 2 for s in scoring)
+        # assert all(isinstance(s[1][0], str) and isinstance(s[1][1], str) for s in scoring)
 
         return scoring
 
