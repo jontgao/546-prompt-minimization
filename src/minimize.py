@@ -9,10 +9,14 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
-
+import hashlib
 from metrics import BERTScoreScorer, CompressionLengthScorer
 
 DEFAULT_LLM = 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
+
+
+def stable_hash(s: str) -> str:
+    return hashlib.sha256(s.encode('utf-8')).hexdigest()
 
 
 class MultiStageOptimization:
@@ -54,7 +58,7 @@ class MultiStageOptimization:
         prompts: List[Tuple[str, float]] = []
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        run_hash = str(hash(initial_prompt + '_' + initial_prompt_output))
+        run_hash = str(stable_hash(initial_prompt + '_' + initial_prompt_output))
         run_name = f'run-{timestamp}-{run_hash}'
 
         save_folder = self.base_folder / run_name
@@ -135,7 +139,7 @@ class MultiStageOptimization:
     def generate(self, prompts: List[Tuple[float, Tuple[str, str]]], system_prompt: str) -> Tuple[List[Tuple[str, str]], List[str]]:
         messages = []
 
-        weights = [s for s, _ in prompts]
+        weights = [1/(s + 1) for s, _ in prompts]
 
         prompts_to_use = random.choices(prompts, k=self.batch_size, weights=weights)
 
@@ -207,10 +211,11 @@ if __name__ == '__main__':
 
     temp = MultiStageOptimization(Config())
 
-    prompt = 'Who was Kyle Van Zyl playing against when he scored 36 of hisa teams 61 points?'
+    for i in range(10):
+        prompt = 'Who was Kyle Van Zyl playing against when he scored 36 of hisa teams 61 points?'
 
-    output = '''Van Zyl joined the Eastern Province Kings Academy, where he played for the Eastern Province U19 side in the 2010 Under-19 Provincial Championship. He was a key player for the Eastern Province U21 side in the 2012 Under-21 Provincial Championship, scoring 71 points in eight appearances. Van Zyl was under the Top SARU Performers, scoring the most tries at 6 in the 2012 Provincial Under 21 in the Rugby Junior Provincials.
+        output = '''Van Zyl joined the Eastern Province Kings Academy, where he played for the Eastern Province U19 side in the 2010 Under-19 Provincial Championship. He was a key player for the Eastern Province U21 side in the 2012 Under-21 Provincial Championship, scoring 71 points in eight appearances. Van Zyl was under the Top SARU Performers, scoring the most tries at 6 in the 2012 Provincial Under 21 in the Rugby Junior Provincials.
+    
+    This included a record and a remarkable personal haul in their opening match, when he scored 36 of his team's points in a 61–3 victory over Boland U21, consisting of four tries and eight conversions and was awarded Man of the Match.'''
 
-This included a record and a remarkable personal haul in their opening match, when he scored 36 of his team's points in a 61–3 victory over Boland U21, consisting of four tries and eight conversions and was awarded Man of the Match.'''
-
-    temp(prompt, output)
+        temp(prompt, output)
