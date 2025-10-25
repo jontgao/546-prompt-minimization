@@ -1,3 +1,4 @@
+import gc
 import hashlib
 import heapq
 import json
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import Tuple, List, Dict, Union
 
 import numpy as np
+import ray
 import torch
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
@@ -288,7 +290,12 @@ if __name__ == '__main__':
             prompt = 'Who was Kyle Van Zyl playing against when he scored 36 of hisa teams 61 points?'
 
             output = '''Van Zyl joined the Eastern Province Kings Academy, where he played for the Eastern Province U19 side in the 2010 Under-19 Provincial Championship. He was a key player for the Eastern Province U21 side in the 2012 Under-21 Provincial Championship, scoring 71 points in eight appearances. Van Zyl was under the Top SARU Performers, scoring the most tries at 6 in the 2012 Provincial Under 21 in the Rugby Junior Provincials.
-        
+
         This included a record and a remarkable personal haul in their opening match, when he scored 36 of his team's points in a 61–3 victory over Boland U21, consisting of four tries and eight conversions and was awarded Man of the Match.'''
 
             temp(prompt, output)
+
+        del temp
+        gc.collect()
+        torch.cuda.empty_cache()
+        ray.shutdown()
