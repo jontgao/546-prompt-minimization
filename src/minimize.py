@@ -1,3 +1,4 @@
+import hashlib
 import heapq
 import json
 import random
@@ -9,7 +10,7 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
-import hashlib
+
 from metrics import BERTScoreScorer, CompressionLengthScorer
 
 DEFAULT_LLM = 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
@@ -68,7 +69,7 @@ class MultiStageOptimization:
 
         system_prompt = self.generate_system_prompt(initial_prompt, initial_prompt_output)
 
-        self.save_meta(save_folder, initial_prompt, initial_prompt_output , system_prompt)
+        self.save_meta(save_folder, initial_prompt, initial_prompt_output, system_prompt)
 
         initial_prompt_output_encoded = self.tokenizer.encode(initial_prompt_output)
 
@@ -100,11 +101,11 @@ class MultiStageOptimization:
 
             prompt_outputs, seeds = self.stage_one(current_best_prompts, system_prompt)
 
-            print("Prompt outputs:", prompt_outputs)
+            # print("Prompt outputs:", prompt_outputs)
 
             scores = self.score(prompt_outputs, initial_prompt, initial_prompt_output)
 
-            print("Scored outputs:", scores)
+            # print("Scored outputs:", scores)
 
             for (score_, (prompt_, prompt_output_)), seed in zip(scores, seeds):
                 events.append({
@@ -126,7 +127,7 @@ class MultiStageOptimization:
             print(f"Using the following prompts as top, score:{best[0]}, prompt:{best[1][0]}")
 
     def generate_system_prompt(self, initial_prompt: str,
-                  initial_prompt_output: str) -> str:
+                               initial_prompt_output: str) -> str:
         system_prompt = fr"""You are a PRECISION prompt-compression specialist. Your job: produce a new,
 significantly shorter prompt that, when given to the same LLM under the
 same generation settings, will produce the EXACT SAME textual output as the
@@ -190,14 +191,16 @@ COMPRESSED PROMPT (valid conservative): Opponent when Kyle Van Zyl scored 36 of 
 
         return system_prompt
 
-    def stage_one(self, prompts: List[Tuple[float, Tuple[str, str]]], system_prompt: str) -> Tuple[List[Tuple[str, str]], List[str]]:
+    def stage_one(self, prompts: List[Tuple[float, Tuple[str, str]]], system_prompt: str) -> Tuple[
+        List[Tuple[str, str]], List[str]]:
 
         return self.generate(prompts, system_prompt)
 
-    def generate(self, prompts: List[Tuple[float, Tuple[str, str]]], system_prompt: str) -> Tuple[List[Tuple[str, str]], List[str]]:
+    def generate(self, prompts: List[Tuple[float, Tuple[str, str]]], system_prompt: str) -> Tuple[
+        List[Tuple[str, str]], List[str]]:
         messages = []
 
-        weights = [1/(s + 1) for s, _ in prompts]
+        weights = [1 / (s + 1) for s, _ in prompts]
 
         prompts_to_use = random.choices(prompts, k=self.batch_size, weights=weights)
 
@@ -256,6 +259,7 @@ SEED PROMPT SCORE: {score}
 
 
 if __name__ == '__main__':
+
     class Config:
         model = 'Qwen/Qwen2.5-32B-Instruct-AWQ'
         # model = DEFAULT_LLM
@@ -267,17 +271,24 @@ if __name__ == '__main__':
         num_iterations = 30
         top_n = 10
         batch_size = 200
-        max_token_length = 10000
+        max_token_length = 30000
         run_folder = 'runs'
 
 
-    temp = MultiStageOptimization(Config())
+    models = [DEFAULT_LLM, 'meta-llama/Llama-3.1-8B-Instruct', 'Qwen/Qwen2.5-32B-Instruct-AWQ']
 
-    for i in range(10):
-        prompt = 'Who was Kyle Van Zyl playing against when he scored 36 of hisa teams 61 points?'
+    config = Config()
 
-        output = '''Van Zyl joined the Eastern Province Kings Academy, where he played for the Eastern Province U19 side in the 2010 Under-19 Provincial Championship. He was a key player for the Eastern Province U21 side in the 2012 Under-21 Provincial Championship, scoring 71 points in eight appearances. Van Zyl was under the Top SARU Performers, scoring the most tries at 6 in the 2012 Provincial Under 21 in the Rugby Junior Provincials.
-    
-    This included a record and a remarkable personal haul in their opening match, when he scored 36 of his team's points in a 61–3 victory over Boland U21, consisting of four tries and eight conversions and was awarded Man of the Match.'''
+    for model in models:
+        config.model = model
 
-        temp(prompt, output)
+        temp = MultiStageOptimization(config)
+
+        for i in range(3):
+            prompt = 'Who was Kyle Van Zyl playing against when he scored 36 of hisa teams 61 points?'
+
+            output = '''Van Zyl joined the Eastern Province Kings Academy, where he played for the Eastern Province U19 side in the 2010 Under-19 Provincial Championship. He was a key player for the Eastern Province U21 side in the 2012 Under-21 Provincial Championship, scoring 71 points in eight appearances. Van Zyl was under the Top SARU Performers, scoring the most tries at 6 in the 2012 Provincial Under 21 in the Rugby Junior Provincials.
+        
+        This included a record and a remarkable personal haul in their opening match, when he scored 36 of his team's points in a 61–3 victory over Boland U21, consisting of four tries and eight conversions and was awarded Man of the Match.'''
+
+            temp(prompt, output)
