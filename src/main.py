@@ -21,6 +21,8 @@ if __name__ == "__main__":
     parser.add_argument('--max_token_length', type=int, default=1_000, help='Max token length to output')
     parser.add_argument('--method', type=str, choices=['ga', 'agent'], default='ga',
                         help='The optimization algorithm to use')
+    parser.add_argument("--use_initial_output", type=bool, default=True, action=argparse.BooleanOptionalAction,
+                        help="Use the output given, otherwise generate the output from the LLM.")
 
     config = parser.parse_args()
 

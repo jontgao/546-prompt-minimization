@@ -5,7 +5,7 @@ import json
 import random
 from datetime import datetime
 from pathlib import Path
-from typing import Tuple, List, Dict, Union
+from typing import Tuple, List, Dict, Union, Optional
 
 import numpy as np
 import ray
@@ -51,14 +51,21 @@ class MultiStageOptimization:
                 'initial_prompt': initial_prompt,
                 'initial_output': initial_prompt_output,
                 'system_prompt': system_prompt,
-                'tokenizer_model': self.config.model
+                'tokenizer_model': self.config.model,
+                'use_initial_output': self.config.use_initial_output,
+                'bert_score_weight': self.bert_score_weight,
+                'compression_weight': self.compression_weight,
+                'top_n': self.top_n,
+                'num_iterations': self.num_iterations,
+                'batch_size': self.batch_size,
+                'base_folder': str(self.base_folder.absolute())
             }, f, indent=4)
 
     def save_events(self, save_dir, events: List[Dict[str, Union[str, float]]]):
         with open(save_dir / 'events.json', 'w') as f:
             json.dump(events, f, indent=4)
 
-    def __call__(self, initial_prompt: str, initial_prompt_output: str):
+    def __call__(self, initial_prompt: str, initial_prompt_output: Optional[str] = None):
         prompts: List[Tuple[str, float]] = []
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -68,6 +75,16 @@ class MultiStageOptimization:
         save_folder = self.base_folder / run_name
 
         save_folder.mkdir(parents=True, exist_ok=True)
+
+        if self.config.use_initial_output:
+            assert initial_prompt_output is not None, "You need to supply an initial prompt output"
+        else:
+            sampling_params = SamplingParams(temperature=self.config.temperature, top_p=self.config.top_p,
+                                             max_tokens=self.config.max_token_length)
+
+            new_prompt_outputs = self.llm.generate(initial_prompt, sampling_params)[0]
+
+            initial_prompt_output = new_prompt_outputs.outputs[0].text.strip()
 
         system_prompt = self.generate_system_prompt(initial_prompt, initial_prompt_output)
 
@@ -91,7 +108,12 @@ class MultiStageOptimization:
                 'prompt': initial_prompt,
                 'output': initial_prompt_output,
                 'score': self.compression_weight,
-                'origin': None
+                'origin': None,
+                'scores': {
+                    'bert': 0,
+                    'compression': self.compression_weight,
+                    'total': self.compression_weight,
+                }
             }
 
         ]
@@ -105,17 +127,18 @@ class MultiStageOptimization:
 
             # print("Prompt outputs:", prompt_outputs)
 
-            scores = self.score(prompt_outputs, initial_prompt, initial_prompt_output)
+            scores, score_decomp = self.score(prompt_outputs, initial_prompt, initial_prompt_output)
 
             # print("Scored outputs:", scores)
 
-            for (score_, (prompt_, prompt_output_)), seed in zip(scores, seeds):
+            for (score_, (prompt_, prompt_output_)), score_decomp_, seed in zip(scores, score_decomp, seeds):
                 events.append({
                     'iteration': iteration + 1,
                     'prompt': prompt_,
                     'output': prompt_output_,
                     'score': score_,
-                    'origin': seed
+                    'origin': seed,
+                    'scores': score_decomp_
                 })
             self.save_events(save_folder, events)
 
@@ -240,16 +263,34 @@ SEED PROMPT SCORE: {score}
         return [(new_prompt, new_output.outputs[0].text.strip()) for new_prompt, new_output in
                 zip(new_prompts, new_prompt_outputs)], prompt_seed
 
-    def score(self, prompts: List[Tuple[str, str]], initial_prompt: str, initial_prompt_output: str) -> List[
-        Tuple[float, Tuple[str, str]]]:
+    def score(self, prompts: List[Tuple[str, str]], initial_prompt: str, initial_prompt_output: str) -> Tuple[List[
+        Tuple[float, Tuple[str, str]]], List[Dict[str, float]]]:
         prompt_inputs, prompt_outputs = zip(*prompts)
         prompt_inputs, prompt_outputs = list(prompt_inputs), list(prompt_outputs)
 
         compression = np.array(self.compression_scorer.compute_score(prompt_inputs, initial_prompt))
-        bert_score = np.array(self.bert_scorer.compute_score(prompt_outputs, initial_prompt_output))
-        total_score = (((1 - bert_score) * self.bert_score_weight) + (compression * self.compression_weight)).tolist()
+        bert_score = 1.0 - np.array(self.bert_scorer.compute_score(prompt_outputs, initial_prompt_output))
+
+        for i in range(len(prompt_outputs)):
+            prompt_output: str = prompt_outputs[i]
+
+            if len(prompt_output.strip()) == 0:
+                bert_score[i] = 1.0
+
+        total_score = ((bert_score * self.bert_score_weight) + (compression * self.compression_weight)).tolist()
 
         scoring = list(zip(total_score, prompts))
+
+        score_decomps = []
+
+        for c, b, t in zip(compression, bert_score, total_score):
+            score_decomp = {
+                'bert': b,
+                'compression': c,
+                'total': t,
+            }
+
+            score_decomps.append(score_decomp)
 
         # scoring: List[Tuple[float, Tuple[str, str]]]
         # assert len(scoring) == len(prompts)
@@ -257,7 +298,7 @@ SEED PROMPT SCORE: {score}
         # assert all(isinstance(s[1], tuple) and len(s[1]) == 2 for s in scoring)
         # assert all(isinstance(s[1][0], str) and isinstance(s[1][1], str) for s in scoring)
 
-        return scoring
+        return scoring, score_decomps
 
 
 if __name__ == '__main__':
@@ -275,6 +316,7 @@ if __name__ == '__main__':
         batch_size = 200
         max_token_length = 30000
         run_folder = 'runs'
+        use_initial_output = False
 
 
     models = [DEFAULT_LLM, 'meta-llama/Llama-3.1-8B-Instruct', 'Qwen/Qwen2.5-32B-Instruct-AWQ']
