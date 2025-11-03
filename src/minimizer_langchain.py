@@ -42,6 +42,8 @@ class PromptMinimizerLangChain:
         self.evaluator_chain = RunnableLambda(self.evaluate)
         self.full_chain = self.minimize_chain | self.test_chain | self.evaluator_chain
 
+
+
     def __call__(self, original_prompt: str, original_output: str):
         inputs = {
             "original_prompt": original_prompt,
@@ -64,6 +66,7 @@ class PromptMinimizerLangChain:
 
         output = self.llm.invoke(inputs["new_prompt"])
         content = output.content if hasattr(output, "content") else output
+        #print("Generated output:", content)
         return {**inputs, "new_output": content}
 
     # Evaluate new prompt and output.
@@ -98,7 +101,7 @@ class PromptMinimizerLangChain:
 
 if __name__ == "__main__":
     class Config:
-        #ollama = True  
+        ollama = True  
         model = 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
         temperature = 0.0
         bert_score_weight = 0.5
@@ -112,7 +115,10 @@ if __name__ == "__main__":
 
     #history = iterative_minimization(test, steps=3)
     temp = PromptMinimizerLangChain(Config())
-    history = temp(original_prompt, original_output)
+
+    generated_output = temp.llm.invoke(original_prompt)
+    print("generated Output:", generated_output.content if hasattr(generated_output, "content") else generated_output)
+    #history = temp(original_prompt, original_output)
 
     """
     # Run the full chain once

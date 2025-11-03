@@ -5,5 +5,6 @@ sentence-transformers # compute_sentence_bert_cosine
 tf-keras              # compute_sentence_bert_cosine
 scikit-learn          # compute_sentence_bert_cosine
 langchain-core 
-#langchain-ollama     # only if using ollama
+langchain-ollama     # only if using ollama
 langchain-community   # for VLLM support
+bert-score
