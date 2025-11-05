@@ -184,7 +184,10 @@ HOW TO COMPRESS (concrete techniques):
 
 EXACT TASK CONTEXT:
 ORIGINAL PROMPT: {initial_prompt}
-ORIGINAL PROMPT OUTPUT (for fidelity reference): {initial_prompt_output}
+ORIGINAL PROMPT OUTPUT (for fidelity reference): {initial_prompt_output}\
+ORIGINAL SCORE {self.compression_weight}\
+
+You need to be MINIMIZING the score, you should never generate a score that is larger. 
 
 OUTPUT RULE (critical):
 - If you are absolutely certain the new prompt will produce the same output, output that new prompt only.
