@@ -1,11 +1,20 @@
+import numpy as np
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda
+
+import json
+import hashlib
+from datetime import datetime
+from pathlib import Path
+from transformers import AutoTokenizer
+
 # REQUIRES mistral (or other llm) running locally on a ollama server, https://ollama.com/download
-# TODO: include output in system prompt, genereate multiple candidate prompts with .batch()
-# TODO: make compatible with main, flag for vllm or ollama
+# TODO: maybe include output in system prompt, maybe genereate multiple candidate prompts with .batch()
 
 from metrics import BERTScoreScorer, CompressionLengthScorer
 
+def stable_hash(s: str) -> str:
+    return hashlib.sha256(s.encode('utf-8')).hexdigest()
 
 class PromptMinimizerLangChain:
     def __init__(self, config):
@@ -16,25 +25,26 @@ class PromptMinimizerLangChain:
         if getattr(self.config, "ollama", False):
             from langchain_ollama import ChatOllama
             self.llm = ChatOllama(model="mistral", temperature=self.config.temperature, num_predict=self.config.max_token_length)
+
+            self.ollama_minimizer_prompt = ChatPromptTemplate.from_messages([
+                ("system", (
+                    "You are a expert prompt engineer. Your job is to rewrite and minimize prompts to be as short and concise as possible "
+                    "The user will provide you with an original prompt."
+                    "Your job is to generate a new, shorter prompt that will produce the same output"
+                    "ONLY adapt the original prompt to be shorter while preserving its meaning."
+                    "DO NOT use the original output in your response"
+                    "Only answer with the new shorter prompt and nothing else"
+                )),
+                ("user", (
+                    "Original prompt: \n\n{prompt}\n\n "
+                    #"Original prompt: \n\n{output}\n\n " # Spent too much time trying to get this to work, if I include it the LLM copies it... 
+                    "Short prompt:"
+                )),
+            ])
         else:
             from langchain_community.llms import VLLM
             self.llm = VLLM(model=self.config.model, temperature=self.config.temperature, max_new_tokens=self.config.max_token_length)
-
-        # system prompt for minimization, subject to change
-        self.minimizer_prompt = ChatPromptTemplate.from_messages([
-            ("system", (
-                "You are a prompt engineer. Your job is to rewrite and minimize prompts to be as short and concise as possible "
-                "The user will provide you with an original prompt."
-                "Your job is to generate a new, shorter prompt that will produce the same output"
-                "ONLY adapt the original prompt to be shorter while preserving its meaning."
-                "DO NOT use the original output in your response"
-            )),
-            ("user", (
-                "Original prompt: \n\n{prompt}\n\n "
-                #"Original prompt: \n\n{output}\n\n " # Spent too much time trying to get this to work, if I include it the LLM copies it... 
-                "Short prompt:"
-            )),
-        ])
+            self.tokenizer = AutoTokenizer.from_pretrained(self.config.model)        
 
         # Define the chains
         self.minimize_chain = RunnableLambda(self.minimize)
@@ -42,94 +52,202 @@ class PromptMinimizerLangChain:
         self.evaluator_chain = RunnableLambda(self.evaluate)
         self.full_chain = self.minimize_chain | self.test_chain | self.evaluator_chain
 
+        if self.config.save_run:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                session_hash = stable_hash(str(config.__dict__))
+                self.save_dir = Path("runs") / f"session-{timestamp}-{session_hash[:8]}"
+                self.save_dir.mkdir(parents=True, exist_ok=True)
+                self.save_meta()
 
+                # for saving run files
+                self.run_idx = 0
 
-    def __call__(self, original_prompt: str, original_output: str):
-        inputs = {
-            "original_prompt": original_prompt,
-            "original_output": original_output
-        }
-        return self.iterative_minimization(inputs, steps=self.config.num_iterations)
+    def __call__(self, original_prompt: str, original_output: str = None):
+
+        if self.config.generate_output:
+            if self.config.verbose: 
+                print("generating origial output.. ")
+            if self.config.ollama:
+                output = self.llm.invoke(self.ollama_minimizer_prompt.format_messages(prompt=original_prompt))
+                original_output = output.content if hasattr(output, "content") else output
+            else:
+                output = self.llm.invoke(self.generator_prompt(original_prompt))
+                original_output = output.content if hasattr(output, "content") else output
+        else:
+            if original_output is None:
+                raise ValueError("original_output must be provided if generate_output is False")
+            if self.config.verbose:
+                print("Using provided output")
+            
+        self.original_prompt = original_prompt
+        self.original_output = original_output
+
+        if self.config.verbose:
+            print("Original prompt:", original_prompt)
+            print("Original output:", original_output)
+
+        history = self.iterative_minimization()
+
+        if self.config.save_run:
+            self.run_idx += 1
+            timestamp = datetime.now().strftime('%H%M%S')
+            run_hash = stable_hash(str(self.config.__dict__) + timestamp)
+            self.run_file = f"run-{(self.run_idx):03d}-{run_hash[:6]}.json"
+
+            self.save_history(history)
+        
+        return history
+
+    def generator_prompt(self, prompt: str):
+        message = [
+            {"role": "system", "content": "You are a helpful AI chat assistant."},
+            {"role": "user", "content": prompt},
+        ]
+        return self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
+
+    def minimizer_prompt(self, inputs: dict):
+
+        system_prompt = """
+                You are a expert prompt engineer. Your job is to rewrite and minimize prompts to be as short and concise as possible 
+                The user will provide you with an original prompt.
+                Your job is to generate a new, shorter prompt that will produce the same output.
+                You should adapt the original prompt to be shorter while preserving its meaning.
+
+                Your output shoud look like this:
+                (short prompt)
+
+                Only answer with the short prompt and nothing else.
+                The short prompt MUST be shorther than the original prompt.
+                DO NOT just copy the original prompt.
+                """
+        user_prompt = f"""
+                Original prompt: {inputs["prompt"]}
+                Short prompt:
+                """
+        message = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        return self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
 
     # Minimize the prompt
     def minimize(self, inputs: dict):
-        print("Current prompt: ", inputs["prompt"])
+        if self.config.verbose:
+            print("Current prompt: ", inputs["prompt"])
 
-        msg = self.minimizer_prompt.format_messages(prompt=inputs["prompt"]) # add output when system prompt works
+        if self.config.ollama:
+            msg = self.ollama_minimizer_prompt.format_messages(prompt=inputs["prompt"])
+        else:
+            msg = self.minimizer_prompt(inputs)
+          
         response = self.llm.invoke(msg)
         content = response.content if hasattr(response, "content") else response
         return {**inputs, "new_prompt": content}
 
     # Test the minimized prompt
     def test_minimized_prompt(self, inputs: dict):
-        print("Proposed prompt:", inputs["new_prompt"])
+        if self.config.verbose:
+            print("Proposed prompt:", inputs["new_prompt"])
 
-        output = self.llm.invoke(inputs["new_prompt"])
+        if self.config.ollama:
+            output = self.llm.invoke(inputs["new_prompt"])
+        else:
+            output = self.llm.invoke(self.generator_prompt(inputs["new_prompt"]))
+          
         content = output.content if hasattr(output, "content") else output
-        #print("Generated output:", content)
+
+        if self.config.verbose:
+            print("Generated output:", content)
+          
         return {**inputs, "new_output": content}
 
     # Evaluate new prompt and output.
     def evaluate(self, inputs: dict):
-        comp_score = self.compression_scorer.compute_score(inputs["new_prompt"], inputs["original_prompt"])
-        bert_score = self.bert_scorer.compute_score([inputs["new_output"]], [inputs["original_output"]])[0].item()
+        comp_score = self.compression_scorer.compute_score(inputs["new_prompt"], self.original_prompt)
+        bert_score = self.bert_scorer.compute_score([inputs["new_output"]], [self.original_output])[0].item()
         total_score = (1-bert_score) * self.config.bert_score_weight + comp_score * self.config.compression_weight
 
         return {**inputs, "score": total_score, "bert_score": bert_score, "compression_score": comp_score}
 
-    def iterative_minimization(self, inputs: dict, steps=3):
-        inputs["prompt"] = inputs["original_prompt"]
-        inputs["output"] = inputs["original_output"]
+    def iterative_minimization(self):
+        inputs = {
+            "prompt": self.original_prompt,
+            "output": self.original_output,
+        }
+
         history = []
 
-        for i in range(steps):
+        for i in range(self.config.num_iterations):
+            
             print(f"\n--- Step {i+1} ---")
+            inputs["iteration"] = i + 1
 
             result = self.full_chain.invoke(inputs)
             history.append(result)
 
-            print("Compression Score:", result["compression_score"])
-            print("BERT Score:", result["bert_score"])
-            print("Score:", result["score"])
+            print(f"Compression: {result['compression_score']:.4f} | "
+                  f"BERT: {result['bert_score']:.4f} | "
+                  f"Total: {result['score']:.4f}")
 
             inputs["prompt"] = result["new_prompt"]
             #inputs["output"] = result["new_output"]
 
         return history
 
+    def save_meta(self):
+        """Save configuration and initial data (meta.json)"""
+        meta = {
+            "model": self.config.model,
+            "temperature": self.config.temperature,
+            "num_iterations": self.config.num_iterations,
+            "bert_score_weight": self.config.bert_score_weight,
+            "compression_weight": self.config.compression_weight,
+            "max_token_length": self.config.max_token_length,
+            "ollama": getattr(self.config, "ollama", False),
+            "generate_output": self.config.generate_output,
+        }
+        with open(self.save_dir / "meta.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=4)
+
+    def save_history(self, history):
+        # Save everything to a single file at the end
+        run_data = {
+            "meta": {
+                "original_prompt": self.original_prompt,
+                "original_output": self.original_output,
+                "generate_output": self.config.generate_output,
+            },
+            "history": history,
+        }
+
+        with open(self.save_dir / self.run_file, "w", encoding="utf-8") as f:
+            json.dump(run_data, f, indent=4)
+
+        if self.config.verbose:
+            print(f"Run saved to {self.save_dir / self.run_file}")
+
 
 
 if __name__ == "__main__":
+
     class Config:
-        ollama = True  
-        model = 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
+        ollama = False
+        model = 'Qwen/Qwen2.5-7B-Instruct'
         temperature = 0.0
         bert_score_weight = 0.5
         compression_weight = 0.5
         num_iterations = 3
-        max_token_length = 200
-    
+        max_token_length = 1000
+        save_run = True
+        generate_output = True
+        verbose = True
+
+    temp = PromptMinimizerLangChain(Config())
+
     # Test input
     original_prompt = "Explain the process of photosynthesis in simple terms for a 10th grade science class."
     original_output = "Photosynthesis is the process plants use to convert sunlight into energy. They take in carbon dioxide and water, and with the help of sunlight, they produce glucose and oxygen."
 
-    #history = iterative_minimization(test, steps=3)
-    temp = PromptMinimizerLangChain(Config())
+    history = temp(original_prompt, original_output)
 
-    generated_output = temp.llm.invoke(original_prompt)
-    print("generated Output:", generated_output.content if hasattr(generated_output, "content") else generated_output)
-    #history = temp(original_prompt, original_output)
 
-    """
-    # Run the full chain once
-    result = full_chain.invoke(test)
-
-    # Print output
-    print("Prompt Minimization Result:\n")
-    print("Original Prompt:", result["original_prompt"])
-    print("Shortened Prompt:", result["new_promp"])
-    print("New Output:", result["new_output"])
-    print("BERT Score:", result["bert_score"])
-    print("Compression Score:", result["compression_score"])
-    print("Score:", result["score"])
-    """
