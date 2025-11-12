@@ -1,4 +1,4 @@
-import numpy as np
+import torch
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda
 
@@ -43,7 +43,11 @@ class PromptMinimizerLangChain:
             ])
         else:
             from langchain_community.llms import VLLM
-            self.llm = VLLM(model=self.config.model, temperature=self.config.temperature, max_new_tokens=self.config.max_token_length)
+            self.llm = VLLM(model=self.config.model, temperature=self.config.temperature, max_new_tokens=self.config.max_token_length,
+                            tensor_parallel_size=torch.cuda.device_count(),
+                            gpu_memory_utilization=0.85,
+                            enable_prefix_caching=True
+                            )
             self.tokenizer = AutoTokenizer.from_pretrained(self.config.model)        
 
         # Define the chains
@@ -164,7 +168,7 @@ class PromptMinimizerLangChain:
     # Evaluate new prompt and output.
     def evaluate(self, inputs: dict):
         comp_score = self.compression_scorer.compute_score(inputs["new_prompt"], self.original_prompt)
-        bert_score = self.bert_scorer.compute_score([inputs["new_output"]], [self.original_output])[0].item()
+        bert_score = self.bert_scorer.compute_score([inputs["new_output"]], [self.original_output])[0]
         total_score = (1-bert_score) * self.config.bert_score_weight + comp_score * self.config.compression_weight
 
         return {**inputs, "score": total_score, "bert_score": bert_score, "compression_score": comp_score}
