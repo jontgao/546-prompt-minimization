@@ -6,4 +6,7 @@ datasets
 huggingface_hub
 openai
 vllm # pip install vllm --extra-index-url https://download.pytorch.org/whl/cu128
-flashinfer-python
+peft
+trl
+sentence_transformers
+bitsandbytes
