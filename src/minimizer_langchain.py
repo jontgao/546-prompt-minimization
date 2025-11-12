@@ -236,18 +236,79 @@ if __name__ == "__main__":
         temperature = 0.0
         bert_score_weight = 0.5
         compression_weight = 0.5
-        num_iterations = 3
+        num_iterations = 10
         max_token_length = 1000
         save_run = True
         generate_output = True
-        verbose = True
+        verbose = False
 
     temp = PromptMinimizerLangChain(Config())
 
     # Test input
-    original_prompt = "Explain the process of photosynthesis in simple terms for a 10th grade science class."
-    original_output = "Photosynthesis is the process plants use to convert sunlight into energy. They take in carbon dioxide and water, and with the help of sunlight, they produce glucose and oxygen."
+    #original_prompt = "Explain the process of photosynthesis in simple terms for a 10th grade science class."
+    #original_output = "Photosynthesis is the process plants use to convert sunlight into energy. They take in carbon dioxide and water, and with the help of sunlight, they produce glucose and oxygen."
 
-    history = temp(original_prompt, original_output)
+    #history = temp(original_prompt, original_output)
+    history_list = []
+    prompt_list = [
+        "Explain the process of photosynthesis in simple terms for a 10th grade science class.",
+        "Explain the process of planetary motion in simple terms for highschool children",
+        "Who won the football world cup in 2014, and who scored the final goal"
+    ]
+
+    for prompt in prompt_list:
+        out = temp(prompt, None)
+        history_list.append(out)
+
+    # plotting results 
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    plt.figure(figsize=(10, 5))
+
+    num_iters = len(history_list[0])  # assumes all histories same length
+
+    # Collect data
+    all_scores = np.array([[step['score'] for step in h] for h in history_list])
+    all_bert_scores = np.array([[1 - step['bert_score'] for step in h] for h in history_list])
+    all_compression_scores = np.array([[step['compression_score'] for step in h] for h in history_list])
+
+    # Compute mean and std
+    mean_scores = all_scores.mean(axis=0)
+    std_scores = all_scores.std(axis=0)
+
+    mean_bert = all_bert_scores.mean(axis=0)
+    std_bert = all_bert_scores.std(axis=0)
+
+    mean_compression = all_compression_scores.mean(axis=0)
+    std_compression = all_compression_scores.std(axis=0)
+
+    x = np.arange(num_iters)
+
+    # Plot mean lines
+    plt.plot(x, mean_scores, color='tab:blue', label='Overall (mean)', linewidth=2.5, marker='o')
+    plt.plot(x, mean_bert, color='tab:orange', label='BERT (mean)', linewidth=2.5, marker='s')
+    plt.plot(x, mean_compression, color='tab:green', label='Compression (mean)', linewidth=2.5, marker='^')
+
+    # Plot ±1 std shading
+    plt.fill_between(x, mean_scores - std_scores, mean_scores + std_scores, color='tab:blue', alpha=0.2)
+    plt.fill_between(x, mean_bert - std_bert, mean_bert + std_bert, color='tab:orange', alpha=0.2)
+    plt.fill_between(x, mean_compression - std_compression, mean_compression + std_compression, color='tab:green', alpha=0.2)
+
+    # Labels & formatting
+    plt.xlabel('Iteration')
+    plt.xticks(x, range(1, num_iters + 1))
+    plt.ylabel('Score')
+    plt.ylim(0, 1)
+    plt.title('Average Prompt Minimization Scores (±1 Std) Over Iterations')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f"{temp.save_dir}/prompt_minimization_scores.png")
+
+
+
+
 
 
