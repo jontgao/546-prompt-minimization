@@ -332,8 +332,8 @@ def main():
         temperature = 0.9
         top_p = 0.95
         seed = 0
-        bert_score_weight = 10.0
-        compression_weight = 1.0
+        bert_score_weight = 0.5
+        compression_weight = 0.5
         num_iterations = 15
         top_n = 10
         batch_size = 100
@@ -341,8 +341,7 @@ def main():
         run_folder = 'runs'
         use_initial_output = False
 
-
-    models = ['meta-llama/Llama-3.1-8B-Instruct', 'Qwen/Qwen2.5-32B-Instruct-AWQ']
+    models = [DEFAULT_LLM, 'meta-llama/Llama-3.1-8B-Instruct', 'Qwen/Qwen2.5-32B-Instruct-AWQ']
 
     config = Config()
 
