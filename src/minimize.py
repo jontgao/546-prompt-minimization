@@ -10,7 +10,6 @@ from typing import Tuple, List, Dict, Union, Optional
 import numpy as np
 import ray
 import torch
-from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
 from metrics import BERTScoreScorer, CompressionLengthScorer
@@ -27,11 +26,12 @@ class MultiStageOptimization:
         self.llm = LLM(model=config.model, seed=config.seed,
                        tensor_parallel_size=torch.cuda.device_count(),
                        gpu_memory_utilization=0.85,
-                       enable_prefix_caching=True)
+                       enable_prefix_caching=True,
+                       trust_remote_code=True)
 
         self.config = config
 
-        self.tokenizer = AutoTokenizer.from_pretrained(config.model)
+        self.tokenizer = self.llm.get_tokenizer()
 
         self.bert_scorer = BERTScoreScorer()
         self.bert_score_weight = config.bert_score_weight
@@ -44,6 +44,17 @@ class MultiStageOptimization:
         self.batch_size = config.batch_size
 
         self.base_folder = Path(config.run_folder)
+
+        self.stop_token_ids = [self.tokenizer.eos_token_id,
+                               self.tokenizer.convert_tokens_to_ids("<|eot_id|>"),
+                               self.tokenizer.convert_tokens_to_ids("<|end_of_text|>"),
+                               self.tokenizer.convert_tokens_to_ids("<|endoftext|>"),
+                               self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+                               ]
+
+        self.stop_token_ids = list(set(filter(lambda x: x is not None, self.stop_token_ids)))
+
+        print("Using stop tokens:", self.stop_token_ids)
 
     def save_meta(self, save_dir, initial_prompt: str, initial_prompt_output, system_prompt):
         with open(save_dir / 'meta.json', 'w') as f:
@@ -68,21 +79,20 @@ class MultiStageOptimization:
     def __call__(self, initial_prompt: str, initial_prompt_output: Optional[str] = None):
         prompts: List[Tuple[str, float]] = []
 
+        self.sampling_params = SamplingParams(temperature=self.config.temperature, top_p=self.config.top_p,
+                                              max_tokens=self.config.max_token_length,
+                                              stop_token_ids=self.stop_token_ids)
+
         if self.config.use_initial_output:
             assert initial_prompt_output is not None, "You need to supply an initial prompt output"
         else:
-            sampling_params = SamplingParams(temperature=self.config.temperature, top_p=self.config.top_p,
-                                             max_tokens=self.config.max_token_length)
-
-            new_prompt_outputs = self.llm.generate(initial_prompt, sampling_params)[0]
-
-            initial_prompt_output = new_prompt_outputs.outputs[0].text.strip()
+            initial_prompt_output = self.generate_task_output(initial_prompt)
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         run_hash = str(stable_hash(initial_prompt))
         run_name = f'run-{timestamp}-{run_hash}'
 
-        save_folder = self.base_folder / config.model.split('/')[-1] / run_name
+        save_folder = self.base_folder / self.config.model.split('/')[-1] / run_name
 
         save_folder.mkdir(parents=True, exist_ok=True)
 
@@ -93,9 +103,7 @@ class MultiStageOptimization:
         initial_prompt_output_encoded = self.tokenizer.encode(initial_prompt_output)
 
         max_output_length = min(len(initial_prompt_output_encoded), self.config.max_token_length)
-
-        self.sampling_params = SamplingParams(temperature=self.config.temperature, top_p=self.config.top_p,
-                                              max_tokens=max_output_length)
+        self.sampling_params.max_tokens = max_output_length
 
         print("Using max token length", max_output_length)
 
@@ -233,38 +241,51 @@ COMPRESSED PROMPT (valid conservative): Opponent when Kyle Van Zyl scored 36 of 
         prompts_to_use = random.choices(prompts, k=self.batch_size, weights=weights)
 
         for score, (prompt, prompt_output) in prompts_to_use:
-            text = [
-                {
-                    'role': 'system', 'content': system_prompt,
-                },
-                {
-                    'role': 'user',
-                    'content': f'''For context on previous iterations, the following seed prompt was used
+            text = f'''For context on previous iterations, the following seed prompt was used
 SEED PROMPT: {prompt} 
 SEED PROMPT OUTPUT: {prompt_output}
 SEED PROMPT SCORE: {score} 
-''',
-                }
-            ]
-
-            text = self.tokenizer.apply_chat_template(
-                text,
-                tokenize=False,
-                add_generation_prompt=True
-            )
+'''
 
             messages.append(text)
 
         prompt_seed = [seed for _, (seed, _) in prompts_to_use]
 
-        outputs = self.llm.generate(messages, self.sampling_params)
+        new_prompts = self.generate_task_outputs(messages, system_prompt)
 
-        new_prompts = [output.outputs[0].text.strip() for output in outputs]
+        new_prompt_outputs = self.generate_task_outputs(new_prompts)
 
-        new_prompt_outputs = self.llm.generate(new_prompts, self.sampling_params)
+        return list(zip(new_prompts, new_prompt_outputs)), prompt_seed
 
-        return [(new_prompt, new_output.outputs[0].text.strip()) for new_prompt, new_output in
-                zip(new_prompts, new_prompt_outputs)], prompt_seed
+    def generate_task_output(self, user_prompt: str) -> str:
+        messages = [
+            {"role": "user", "content": user_prompt}
+        ]
+        text = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        out = self.llm.generate(text, self.sampling_params)[0]
+        return out.outputs[0].text.strip()
+
+    def generate_task_outputs(self, user_prompts: list[str], system_prompt: str = None) -> list[str]:
+        all_messages = []
+
+        for user_prompt in user_prompts:
+            messages = []
+
+            if system_prompt is not None:
+                messages += [{'role': 'system', 'content': system_prompt}]
+            messages += [{'role': 'user', 'content': user_prompt}]
+
+            text = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+
+            all_messages.append(text)
+
+        outputs = self.llm.generate(all_messages, self.sampling_params)
+
+        return [output.outputs[0].text.strip() for output in outputs]
 
     def score(self, prompts: List[Tuple[str, str]], initial_prompt: str, initial_prompt_output: str) -> Tuple[List[
         Tuple[float, Tuple[str, str]]], List[Dict[str, float]]]:
@@ -304,8 +325,7 @@ SEED PROMPT SCORE: {score}
         return scoring, score_decomps
 
 
-if __name__ == '__main__':
-
+def main():
     class Config:
         model = 'Qwen/Qwen2.5-32B-Instruct-AWQ'
         # model = DEFAULT_LLM
@@ -342,3 +362,7 @@ if __name__ == '__main__':
         gc.collect()
         torch.cuda.empty_cache()
         ray.shutdown()
+
+
+if __name__ == '__main__':
+    main()
