@@ -68,14 +68,6 @@ class MultiStageOptimization:
     def __call__(self, initial_prompt: str, initial_prompt_output: Optional[str] = None):
         prompts: List[Tuple[str, float]] = []
 
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        run_hash = str(stable_hash(initial_prompt + '_' + initial_prompt_output))
-        run_name = f'run-{timestamp}-{run_hash}'
-
-        save_folder = self.base_folder / run_name
-
-        save_folder.mkdir(parents=True, exist_ok=True)
-
         if self.config.use_initial_output:
             assert initial_prompt_output is not None, "You need to supply an initial prompt output"
         else:
@@ -85,6 +77,14 @@ class MultiStageOptimization:
             new_prompt_outputs = self.llm.generate(initial_prompt, sampling_params)[0]
 
             initial_prompt_output = new_prompt_outputs.outputs[0].text.strip()
+
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        run_hash = str(stable_hash(initial_prompt))
+        run_name = f'run-{timestamp}-{run_hash}'
+
+        save_folder = self.base_folder / config.model.split('/')[-1] / run_name
+
+        save_folder.mkdir(parents=True, exist_ok=True)
 
         system_prompt = self.generate_system_prompt(initial_prompt, initial_prompt_output)
 
@@ -314,31 +314,29 @@ if __name__ == '__main__':
         seed = 0
         bert_score_weight = 10.0
         compression_weight = 1.0
-        num_iterations = 30
+        num_iterations = 15
         top_n = 10
-        batch_size = 200
+        batch_size = 100
         max_token_length = 30000
         run_folder = 'runs'
         use_initial_output = False
 
 
-    models = [DEFAULT_LLM, 'meta-llama/Llama-3.1-8B-Instruct', 'Qwen/Qwen2.5-32B-Instruct-AWQ']
+    models = ['meta-llama/Llama-3.1-8B-Instruct', 'Qwen/Qwen2.5-32B-Instruct-AWQ']
 
     config = Config()
+
+    with open('data/long_prompts.json', 'r') as f:
+        prompts = json.load(f)
 
     for model in models:
         config.model = model
 
         temp = MultiStageOptimization(config)
 
-        for i in range(3):
-            prompt = 'Who was Kyle Van Zyl playing against when he scored 36 of hisa teams 61 points?'
-
-            output = '''Van Zyl joined the Eastern Province Kings Academy, where he played for the Eastern Province U19 side in the 2010 Under-19 Provincial Championship. He was a key player for the Eastern Province U21 side in the 2012 Under-21 Provincial Championship, scoring 71 points in eight appearances. Van Zyl was under the Top SARU Performers, scoring the most tries at 6 in the 2012 Provincial Under 21 in the Rugby Junior Provincials.
-
-        This included a record and a remarkable personal haul in their opening match, when he scored 36 of his team's points in a 61–3 victory over Boland U21, consisting of four tries and eight conversions and was awarded Man of the Match.'''
-
-            temp(prompt, output)
+        for prompt in prompts:
+            for i in range(1):
+                temp(prompt)
 
         del temp
         gc.collect()
