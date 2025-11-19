@@ -341,7 +341,7 @@ def main():
         run_folder = 'runs'
         use_initial_output = False
 
-    models = [DEFAULT_LLM, 'meta-llama/Llama-3.1-8B-Instruct', 'Qwen/Qwen2.5-32B-Instruct-AWQ']
+    models = ['meta-llama/Llama-3.1-8B-Instruct', 'Qwen/Qwen2.5-32B-Instruct-AWQ']
 
     config = Config()
 
