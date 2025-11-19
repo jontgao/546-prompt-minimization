@@ -236,12 +236,12 @@ if __name__ == "__main__":
 
     class Config:
         ollama = False
-        model = 'Qwen/Qwen2.5-7B-Instruct'
+        model = 'Qwen/Qwen2.5-32B-Instruct-AWQ'
         temperature = 0.0
         bert_score_weight = 0.5
         compression_weight = 0.5
         num_iterations = 10
-        max_token_length = 1000
+        max_token_length = 32000
         save_run = True
         generate_output = True
         verbose = False

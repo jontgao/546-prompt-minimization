@@ -5,7 +5,6 @@
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/data" />
       <excludeFolder url="file://$MODULE_DIR$/runs" />
-      <excludeFolder url="file://$MODULE_DIR$/runs_prev" />
     </content>
     <orderEntry type="jdk" jdkName="546-prompt-minimization" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
