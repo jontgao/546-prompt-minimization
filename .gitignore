@@ -1,5 +1,7 @@
 # Run configs
 runs/
+runs*/
+runs*.zip
 
 
 outcmaes/
