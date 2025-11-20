@@ -254,11 +254,14 @@ if __name__ == "__main__":
 
     #history = temp(original_prompt, original_output)
     history_list = []
-    prompt_list = [
-        "Explain the process of photosynthesis in simple terms for a 10th grade science class.",
-        "Explain the process of planetary motion in simple terms for highschool children",
-        "Who won the football world cup in 2014, and who scored the final goal"
-    ]
+    # prompt_list = [
+    #     "Explain the process of photosynthesis in simple terms for a 10th grade science class.",
+    #     "Explain the process of planetary motion in simple terms for highschool children",
+    #     "Who won the football world cup in 2014, and who scored the final goal"
+    # ]
+
+    with open('data/long_prompts.json', 'r') as f:
+        prompt_list = json.load(f)
 
     for prompt in prompt_list:
         out = temp(prompt, None)
