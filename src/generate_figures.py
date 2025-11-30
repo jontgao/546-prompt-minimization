@@ -54,12 +54,15 @@ def densify_history(milestones: List[Dict], max_iter: int = 15) -> np.array:
     dense = np.full(max_iter + 1, np.nan)
     dense[0] = 0.5
 
+    dense_compression = np.copy(dense)
+
     sorted_evs = sorted(milestones, key=lambda x: int(x.get('iteration', 0)))
 
     if not sorted_evs:
         return dense
 
     current_best = 0.5
+    current_best_compression = 0.5
 
     milestone_idx = 0
 
@@ -69,14 +72,25 @@ def densify_history(milestones: List[Dict], max_iter: int = 15) -> np.array:
 
             # Update current best if this milestone is valid
             sc = safe_float(sorted_evs[milestone_idx].get('score', math.inf))
+
+            sc_comp = safe_float(
+                sorted_evs[milestone_idx].get('scores', {}).get('compression', current_best_compression))
+
             if sc < current_best:
                 current_best = sc
+
+            if sc_comp < current_best_compression:
+                current_best_compression = sc_comp
+
             milestone_idx += 1
 
         if current_best != math.inf:
             dense[step] = current_best
 
-    return dense
+        if current_best_compression != math.inf:
+            dense_compression[step] = current_best_compression
+
+    return dense, dense_compression
 
 
 def generate_figures(milestones: dict, out_folder: Path):
@@ -89,49 +103,62 @@ def generate_figures(milestones: dict, out_folder: Path):
             for model_name, events in models_data.items():
                 if not events:
                     continue
-                dense_scores = densify_history(events, max_iter=15)
+                dense_scores, dense_compression = densify_history(events, max_iter=15)
                 if not np.all(np.isnan(dense_scores)):
-                    data_by_model[model_name][method_name].append(dense_scores)
+                    data_by_model[model_name][method_name].append((dense_scores, dense_compression))
 
     for model_name, methods_data in data_by_model.items():
         if not methods_data:
             continue
 
-        fig, ax = plt.subplots(figsize=(8, 6))
+        for i in range(2):
 
-        for method_name, runs_list in methods_data.items():
-            matrix = np.array(runs_list)
+            fig, ax = plt.subplots(figsize=(8, 6))
 
-            color = COLOR_MAP.get(method_name, 'black')
+            for method_name, runs_list in methods_data.items():
+                matrix = np.array(runs_list)
 
-            x_axis = np.arange(0, 16)
-            for row in matrix:
-                ax.plot(x_axis, row, color=color, alpha=0.15, linewidth=1)
+                color = COLOR_MAP.get(method_name, 'black')
 
-            mean_line = np.nanmean(matrix, axis=0)
+                x_axis = np.arange(0, 16)
+                for row in matrix:
+                    ax.plot(x_axis, row[i], color=color, alpha=0.15, linewidth=1)
 
-            ax.plot(x_axis, mean_line, color=color, label=f"{method_name} (Mean)", linewidth=3, linestyle='-')
+                mean_line = np.nanmean(matrix, axis=0)
 
-        # Formatting
-        ax.set_title(f"Optimization Trajectory: {model_name}", fontweight='bold', pad=15)
-        ax.set_xlabel("Iteration Step")
-        ax.set_ylabel("Objective Score (Lower is Better)")
-        ax.set_xlim(0, 15)
-        ax.set_yscale('log')
-        ax.xaxis.set_major_locator(plt.MaxNLocator(nbins=16,integer=True))  # Integer ticks
+                ax.plot(x_axis, mean_line[i], color=color, label=f"{method_name} (Mean)", linewidth=3, linestyle='-')
 
-        # Legend
-        ax.legend(frameon=True, loc='upper right', fancybox=False, edgecolor='black')
+            # Formatting
+            if i == 0:
+                ax.set_title(f"Optimization Trajectory: {model_name}", fontweight='bold', pad=15)
+                ax.set_ylabel("Objective Score (Lower is Better)")
+            else:
+                ax.set_title(f"Compression Trajectory: {model_name}", fontweight='bold', pad=15)
+                ax.set_ylabel("Compression Score (Lower is Better)")
 
-        sanitized_name = model_name.replace("/", "_").replace(" ", "_")
-        out_path = out_folder / f"trajectory_{sanitized_name}.png"
-        out_pdf = out_folder / f"trajectory_{sanitized_name}.pdf"
+            ax.set_xlabel("Iteration Step")
 
-        plt.tight_layout()
-        plt.savefig(out_path, dpi=600, bbox_inches='tight')
-        plt.savefig(out_pdf, bbox_inches='tight')
-        print(f"Generated figure for {model_name} at {out_path}")
-        plt.close()
+            ax.set_xlim(0, 15)
+            ax.set_yscale('log')
+            ax.xaxis.set_major_locator(plt.MaxNLocator(nbins=16, integer=True))  # Integer ticks
+
+            # Legend
+            ax.legend(frameon=True, loc='upper right', fancybox=False, edgecolor='black')
+
+            sanitized_name = model_name.replace("/", "_").replace(" ", "_")
+
+            if i == 0:
+                out_path = out_folder / f"trajectory_{sanitized_name}.png"
+                out_pdf = out_folder / f"trajectory_{sanitized_name}.pdf"
+            else:
+                out_path = out_folder / f"trajectory_compression_{sanitized_name}.png"
+                out_pdf = out_folder / f"trajectory_compression_{sanitized_name}.pdf"
+
+            plt.tight_layout()
+            plt.savefig(out_path, dpi=600, bbox_inches='tight')
+            plt.savefig(out_pdf, bbox_inches='tight')
+            print(f"Generated figure for {model_name} at {out_path}")
+            plt.close()
 
 
 def main(args: Namespace):
