@@ -285,6 +285,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate running-best milestone LaTeX (two-column) from runs/")
     parser.add_argument("--runs-dir", type=str, default="../runs", help="Top-level runs directory")
     parser.add_argument("--out", type=str, default="running_best_milestones", help="Output .tex file")
-    parser.add_argument("--version", type=str, default="karim", choices=['marius', 'karim', 'li'])
+    parser.add_argument("--version", type=str, default="marius", choices=['marius', 'karim', 'li'])
     args = parser.parse_args()
-    main(Path(args.runs_dir), Path(args.out + "_"+ args.version + '.tex'), args.version)
+    main(Path(args.runs_dir + "_" + args.version), Path(args.out + "_"+ args.version + '.tex'), args.version)
