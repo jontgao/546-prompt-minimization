@@ -29,15 +29,8 @@ def latex_escape(s: str) -> str:
     return ''.join(LATEX_SPECIALS.get(ch, ch) for ch in s)
 
 
-def truncate_text(s: str, max_chars: int = 240) -> str:
+def truncate_text(s: str) -> str:
     return s.strip()
-    if s is None:
-        return ''
-    s = s.strip()
-    if len(s) <= max_chars:
-        return s
-    half = max_chars // 2
-    return s[:half].rstrip() + " … " + s[-half:].lstrip()
 
 
 def safe_float(x: Any) -> float:
@@ -52,6 +45,11 @@ def discover_runs(runs_dir: Path) -> List[Path]:
     return [p.parent for p in patterns]
 
 
+def discover_runs_karim(runs_dir: Path) -> List[Path]:
+    patterns = list(runs_dir.glob("*/run*.json"))
+    return patterns
+
+
 def load_run(run_folder: Path):
     meta_path = run_folder / "meta.json"
     events_path = run_folder / "events.json"
@@ -62,6 +60,28 @@ def load_run(run_folder: Path):
     initial_prompt = meta.get("initial_prompt") or "<unknown prompt>"
     model_name = meta.get("tokenizer_model") or meta.get("tokenizer_model", run_folder.parent.name)
     return initial_prompt, model_name, events
+
+
+def load_run_karim(run_folder: Path):
+    meta_path = run_folder.parent / "meta.json"
+    events_path = run_folder
+    if not meta_path.exists() or not events_path.exists():
+        raise FileNotFoundError(f"Missing meta/events in {run_folder}")
+    meta = json.load(meta_path.open("r", encoding="utf-8"))
+    events = json.load(events_path.open("r", encoding="utf-8"))
+    meta.update(events.get('meta', {}))
+
+    history = events['history']
+
+    for event in history:
+        event['scores'] = {
+            'bert': 1 - event['bert_score'],
+            'compression': event['compression_score']
+        }
+
+    initial_prompt = meta.get("original_prompt") or "<unknown prompt>"
+    model_name = meta.get("model", run_folder.parent.name)
+    return initial_prompt, model_name, history
 
 
 def compute_milestones(events: List[Dict[str, Any]]):
@@ -95,6 +115,7 @@ def compute_milestones(events: List[Dict[str, Any]]):
 def make_float_for_prompt(prompt: str,
                           per_model_milestones: Dict[str, List[Dict[str, Any]]],
                           out_path: Path,
+                          version: str
                           ):
     """
     Create a full-width float (figure*) for a single prompt that displays each model
@@ -152,10 +173,21 @@ def make_float_for_prompt(prompt: str,
         column_blocks.append("\n".join(block))
     # Join columns horizontally with small spacing
     # Use \hfill between minipages so they distribute across the width
+
+    temp = 0
+    if version == 'marius':
+        sec = 'icl'
+        temp = 0.9
+    elif version == 'karim':
+        sec = 'zsl'
+        temp = 0
+    else:
+        sec = 'rl'
+
     lines.append((" \\hfill\n").join(column_blocks))
     lines.append(r"\vspace{6pt}")
     lines.append(
-        r"\caption{Milestone (running-best) discoveries for each algorithm on this initial prompt. Each block shows only the iterations where a strictly lower total score was first observed. This prompt minimization uses the Algorithm proposed in \ref{sec:icl}. This is run with a temperature of 0.9 ( as such duplicate prompts can achieve smaller scores).}")
+        fr"\caption{{Milestone (running-best) discoveries for each algorithm on this initial prompt. Each block shows only the iterations where a strictly lower total score was first observed. This prompt minimization uses the Algorithm proposed in \ref{{sec:{sec}}}. This is run with a temperature of {temp} ( as such duplicate prompts can achieve smaller scores).}}")
     lines.append(r"\label{fig:milestones_" + str(abs(hash(prompt)) % (10 ** 8)) + r"}")
     lines.append(r"\end{figure*}")
     lines.append("\n")
@@ -163,14 +195,23 @@ def make_float_for_prompt(prompt: str,
         f.write("\n".join(lines))
 
 
-def main(runs_dir: Path, out_file: Path):
-    run_folders = discover_runs(runs_dir)
+def main(runs_dir: Path, out_file: Path, version: str):
+    if version == 'marius':
+        run_folders = discover_runs(runs_dir)
+    elif version == 'karim':
+        run_folders = discover_runs_karim(runs_dir)
+    else:
+        raise ValueError(f"Unknown version: {version}")
+
     print(f"Discovered {len(run_folders)} run folders under {runs_dir}")
 
     agg = defaultdict(lambda: defaultdict(list))  # prompt -> model -> list[events]
     for rf in run_folders:
         try:
-            initial_prompt, model_name, events = load_run(rf)
+            if version == 'marius':
+                initial_prompt, model_name, events = load_run(rf)
+            elif version == 'karim':
+                initial_prompt, model_name, events = load_run_karim(rf)
         except Exception as e:
             print(f"Skipping {rf} due to error: {e}")
             continue
@@ -198,11 +239,12 @@ def main(runs_dir: Path, out_file: Path):
 \maketitle
 \thispagestyle{plain}
 """
+
     with out_file.open("w", encoding="utf-8") as f:
         f.write(preamble)
 
     for prompt, model_m in per_prompt_milestones.items():
-        make_float_for_prompt(prompt, model_m, out_file)
+        make_float_for_prompt(prompt, model_m, out_file, version)
 
     with out_file.open("a", encoding="utf-8") as f:
         f.write(r"\end{document}" + "\n")
@@ -213,6 +255,7 @@ def main(runs_dir: Path, out_file: Path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate running-best milestone LaTeX (two-column) from runs/")
     parser.add_argument("--runs-dir", type=str, default="../runs_marius", help="Top-level runs directory")
-    parser.add_argument("--out", type=str, default="running_best_milestones.tex", help="Output .tex file")
+    parser.add_argument("--out", type=str, default="running_best_milestones", help="Output .tex file")
+    parser.add_argument("--version", type=str, default="marius", choices=['marius', 'karim', 'li'])
     args = parser.parse_args()
-    main(Path(args.runs_dir), Path(args.out))
+    main(Path(args.runs_dir), Path(args.out + "_"+ args.version + '.tex'), args.version)
