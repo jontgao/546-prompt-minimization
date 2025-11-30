@@ -51,20 +51,21 @@ def densify_history(milestones: List[Dict], max_iter: int = 15) -> np.array:
     Converts a sparse list of milestone events into a dense array of length max_iter + 1.
     Performs forward-fill: the best score at step N persists until a better score is found.
     """
-    dense = np.full(max_iter, np.nan)
+    dense = np.full(max_iter + 1, np.nan)
+    dense[0] = 0.5
 
     sorted_evs = sorted(milestones, key=lambda x: int(x.get('iteration', 0)))
 
     if not sorted_evs:
         return dense
 
-    current_best = math.inf
+    current_best = 0.5
 
     milestone_idx = 0
 
-    for step in range(max_iter):
+    for step in range(max_iter + 1):
         while (milestone_idx < len(sorted_evs) and
-               int(sorted_evs[milestone_idx].get('iteration', 0)) <= step + 1):
+               int(sorted_evs[milestone_idx].get('iteration', 0)) <= step):
 
             # Update current best if this milestone is valid
             sc = safe_float(sorted_evs[milestone_idx].get('score', math.inf))
@@ -103,7 +104,7 @@ def generate_figures(milestones: dict, out_folder: Path):
 
             color = COLOR_MAP.get(method_name, 'black')
 
-            x_axis = np.arange(1, 16)
+            x_axis = np.arange(0, 16)
             for row in matrix:
                 ax.plot(x_axis, row, color=color, alpha=0.15, linewidth=1)
 
@@ -115,8 +116,9 @@ def generate_figures(milestones: dict, out_folder: Path):
         ax.set_title(f"Optimization Trajectory: {model_name}", fontweight='bold', pad=15)
         ax.set_xlabel("Iteration Step")
         ax.set_ylabel("Objective Score (Lower is Better)")
-        ax.set_xlim(1, 15)
-        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))  # Integer ticks
+        ax.set_xlim(0, 15)
+        ax.set_yscale('log')
+        ax.xaxis.set_major_locator(plt.MaxNLocator(nbins=16,integer=True))  # Integer ticks
 
         # Legend
         ax.legend(frameon=True, loc='upper right', fancybox=False, edgecolor='black')
