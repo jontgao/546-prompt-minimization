@@ -1,0 +1,16 @@
+python src/finetune.py \
+    --model_name_or_path EleutherAI/pythia-6.9b \
+    --target_model_path EleutherAI/pythia-6.9b \
+    --output_dir pythia-6.9b-prompt-compressor \
+    --num_ppo_epochs 4 \
+    --per_device_train_batch_size 2 \
+    --gradient_accumulation_steps 2 \
+    --learning_rate 1e-5 \
+    --total_episodes 500 \
+    --use_peft \
+    --lora_r 16 \
+    --lora_alpha 32 \
+    --max_new_tokens 300 \
+    --temperature 0.7 \
+    --compression_ratio_weight 2.0 \
+    --quality_weight 1.0
