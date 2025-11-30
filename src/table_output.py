@@ -74,6 +74,7 @@ def load_run_karim(run_folder: Path):
     history = events['history']
 
     for event in history:
+        event['prompt'] = event['new_prompt']
         event['scores'] = {
             'bert': 1 - event['bert_score'],
             'compression': event['compression_score']
@@ -125,32 +126,50 @@ def make_float_for_prompt(prompt: str,
     # Build LaTeX block
     lines = []
     lines.append(r"\begin{figure*}[t]")
-    lines.append(r"\centering")
+    lines.append(r'\centering')
+    lines.append(r"""\begin{tcolorbox}[
+    colback=mygray, 
+    colframe=gray!50!black, 
+    title=\textbf{Input: Initial Prompt}, 
+    fonttitle=\sffamily\small, 
+    sharp corners=south,
+    boxrule=0.5pt,
+    left=4pt, right=4pt, top=4pt, bottom=4pt
+]""")
     # Use a caption area showing the initial prompt (escaped & truncated)
     esc_prompt = latex_escape(prompt)
-    lines.append(r"\vspace{2pt}")
-    lines.append(r"\noindent\textbf{Initial prompt:} \small\ttfamily " + esc_prompt)
-    lines.append(r"\vspace{6pt}")
-    # Compute width per model; keep small gaps
+    lines.append(r"\small\sffamily\textit{ " + esc_prompt)
+    lines.append("}")
+    lines.append(r'\end{tcolorbox}')
+    lines.append(r'\vspace{-2pt}')
+
     n = max(1, len(models))
-    width_each = f"1\\textwidth"
+
+    width_each = f"{1/n - 0.01}\\textwidth"
     # For each model, create a minipage column
     column_blocks = []
-    for m in models:
+    colors = ['myblue', 'myred']
+
+    for i, m in enumerate(models):
+        color = colors[i % len(colors)]
+
         block = []
         block.append(r"\begin{minipage}[t]{%s}" % width_each)
         block.append(r"\centering")
-        block.append(r"\textbf{\small " + latex_escape(m) + r"}\\[4pt]")
-        block.append(r"\vspace{1pt}")
+        block.append(fr'\textcolor{{{color}}}{{'+r"\textbf{\small " + latex_escape(m) + r"}}")
+        block.append(r"\vspace{2pt}")
+        block.append(r'\hrule height 0.8pt')
+        block.append(r"\vspace{4pt}")
+
         milestones = per_model_milestones[m]
         if not milestones:
             block.append(r"\small (no events)")
         else:
-            milestones.pop(0)
+            if milestones[0]['iteration'] == 0:
+                milestones.pop(0)
 
-            block.append(r"\vspace{-4pt}")
             block.append(r"\begin{flushleft}")
-            block.append(r"\small")
+            block.append(r"\footnotesize")
             # List each milestone: iteration, score, prompt, output
             for ev in milestones:
                 it = int(ev.get("iteration", 0))
@@ -163,11 +182,14 @@ def make_float_for_prompt(prompt: str,
                 p = latex_escape(p_raw)
                 # o = latex_escape(truncate_text(o_raw, max_output_chars))
                 block.append(
-                    r"\textbf{Iter %d} (score=%.4f, bert=%.4f, compression=%.4f) \\ " % (it, sc, 1 - scores['bert'],
+                    r"\textbf{Iter %d} {\scriptsize \color{gray} (Score: %.4f $\mid$ Bert: %.4f $\mid$ Comp: %.4f)} \\ " % (it, sc, 1 - scores['bert'],
                                                                                          scores['compression']))
+                block.append(r'\vspace{1pt}')
                 # Prompt in teletype small
-                block.append(r"\texttt{\footnotesize " + p + r"}\\")
+                block.append(r"\texttt{" + p + r"}\\")
+                block.append(r"\vspace{4pt}")
                 # block.append(r"\textit{\footnotesize " + o + r"}\\[6pt]")
+            block.pop(-1)
             block.append(r"\end{flushleft}")
         block.append(r"\end{minipage}")
         column_blocks.append("\n".join(block))
@@ -184,10 +206,9 @@ def make_float_for_prompt(prompt: str,
     else:
         sec = 'rl'
 
-    lines.append((" \\hfill\n").join(column_blocks))
+    lines.append(("\n\\hfill\n").join(column_blocks))
     lines.append(r"\vspace{6pt}")
-    lines.append(
-        fr"\caption{{Milestone (running-best) discoveries for each algorithm on this initial prompt. Each block shows only the iterations where a strictly lower total score was first observed. This prompt minimization uses the Algorithm proposed in \ref{{sec:{sec}}}. This is run with a temperature of {temp} ( as such duplicate prompts can achieve smaller scores).}}")
+    lines.append(fr"\caption{{\textbf{{Milestone Discoveries in Prompt Minimization.}} The top panel shows the verbose initial prompt. The bottom panels compare the minimization trajectory of Qwen-32B (Left) and Llama-3.1-8B (Right) using Algorithm from Section \ref{{sec:{sec}}}. Metrics indicate total score, BERT-score, and compression ratio. Running with Temperature {temp}.}}")
     lines.append(r"\label{fig:milestones_" + str(abs(hash(prompt)) % (10 ** 8)) + r"}")
     lines.append(r"\end{figure*}")
     lines.append("\n")
@@ -233,6 +254,14 @@ def main(runs_dir: Path, out_file: Path, version: str):
 \usepackage{geometry}
 \geometry{margin=0.7in}
 \setlength{\parskip}{0.4ex}
+
+\usepackage{xcolor}
+\usepackage{tcolorbox}
+\tcbuselibrary{skins, breakable}
+\definecolor{myblue}{RGB}{0, 105, 180}
+\definecolor{myred}{RGB}{200, 50, 50}
+\definecolor{mygray}{RGB}{240, 240, 240}
+
 \begin{document}
 \title{Running-best milestone dumps}
 \author{Auto-generated}
@@ -254,8 +283,8 @@ def main(runs_dir: Path, out_file: Path, version: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate running-best milestone LaTeX (two-column) from runs/")
-    parser.add_argument("--runs-dir", type=str, default="../runs_marius", help="Top-level runs directory")
+    parser.add_argument("--runs-dir", type=str, default="../runs", help="Top-level runs directory")
     parser.add_argument("--out", type=str, default="running_best_milestones", help="Output .tex file")
-    parser.add_argument("--version", type=str, default="marius", choices=['marius', 'karim', 'li'])
+    parser.add_argument("--version", type=str, default="karim", choices=['marius', 'karim', 'li'])
     args = parser.parse_args()
     main(Path(args.runs_dir), Path(args.out + "_"+ args.version + '.tex'), args.version)
