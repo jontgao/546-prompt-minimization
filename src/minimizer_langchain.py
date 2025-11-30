@@ -1,30 +1,34 @@
-import numpy as np
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnableLambda
-
-import json
 import hashlib
+import json
 from datetime import datetime
 from pathlib import Path
+
+import torch
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableLambda
 from transformers import AutoTokenizer
+
+from metrics import BERTScoreScorer, CompressionLengthScorer
+
 
 # REQUIRES mistral (or other llm) running locally on a ollama server, https://ollama.com/download
 # TODO: maybe include output in system prompt, maybe genereate multiple candidate prompts with .batch()
 
-from metrics import BERTScoreScorer, CompressionLengthScorer
 
 def stable_hash(s: str) -> str:
     return hashlib.sha256(s.encode('utf-8')).hexdigest()
 
+
 class PromptMinimizerLangChain:
     def __init__(self, config):
         self.config = config
-        self.bert_scorer  = BERTScoreScorer()
+        self.bert_scorer = BERTScoreScorer()
         self.compression_scorer = CompressionLengthScorer()
-        
+
         if getattr(self.config, "ollama", False):
             from langchain_ollama import ChatOllama
-            self.llm = ChatOllama(model="mistral", temperature=self.config.temperature, num_predict=self.config.max_token_length)
+            self.llm = ChatOllama(model="mistral", temperature=self.config.temperature,
+                                  num_predict=self.config.max_token_length)
 
             self.ollama_minimizer_prompt = ChatPromptTemplate.from_messages([
                 ("system", (
@@ -37,35 +41,40 @@ class PromptMinimizerLangChain:
                 )),
                 ("user", (
                     "Original prompt: \n\n{prompt}\n\n "
-                    #"Original prompt: \n\n{output}\n\n " # Spent too much time trying to get this to work, if I include it the LLM copies it... 
+                    # "Original prompt: \n\n{output}\n\n " # Spent too much time trying to get this to work, if I include it the LLM copies it... 
                     "Short prompt:"
                 )),
             ])
         else:
             from langchain_community.llms import VLLM
-            self.llm = VLLM(model=self.config.model, temperature=self.config.temperature, max_new_tokens=self.config.max_token_length)
-            self.tokenizer = AutoTokenizer.from_pretrained(self.config.model)        
+            self.llm = VLLM(model=self.config.model, temperature=self.config.temperature,
+                            max_new_tokens=self.config.max_token_length,
+                            tensor_parallel_size=torch.cuda.device_count(),
+                            gpu_memory_utilization=0.85,
+                            enable_prefix_caching=True
+                            )
+            self.tokenizer = AutoTokenizer.from_pretrained(self.config.model)
 
-        # Define the chains
+            # Define the chains
         self.minimize_chain = RunnableLambda(self.minimize)
         self.test_chain = RunnableLambda(self.test_minimized_prompt)
         self.evaluator_chain = RunnableLambda(self.evaluate)
         self.full_chain = self.minimize_chain | self.test_chain | self.evaluator_chain
 
         if self.config.save_run:
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                session_hash = stable_hash(str(config.__dict__))
-                self.save_dir = Path("runs") / f"session-{timestamp}-{session_hash[:8]}"
-                self.save_dir.mkdir(parents=True, exist_ok=True)
-                self.save_meta()
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            session_hash = stable_hash(str(config.__dict__))
+            self.save_dir = Path("runs") / f"session-{timestamp}-{session_hash[:8]}"
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+            self.save_meta()
 
-                # for saving run files
-                self.run_idx = 0
+            # for saving run files
+            self.run_idx = 0
 
     def __call__(self, original_prompt: str, original_output: str = None):
 
         if self.config.generate_output:
-            if self.config.verbose: 
+            if self.config.verbose:
                 print("generating origial output.. ")
             if self.config.ollama:
                 output = self.llm.invoke(self.ollama_minimizer_prompt.format_messages(prompt=original_prompt))
@@ -78,7 +87,7 @@ class PromptMinimizerLangChain:
                 raise ValueError("original_output must be provided if generate_output is False")
             if self.config.verbose:
                 print("Using provided output")
-            
+
         self.original_prompt = original_prompt
         self.original_output = original_output
 
@@ -95,7 +104,7 @@ class PromptMinimizerLangChain:
             self.run_file = f"run-{(self.run_idx):03d}-{run_hash[:6]}.json"
 
             self.save_history(history)
-        
+
         return history
 
     def generator_prompt(self, prompt: str):
@@ -139,7 +148,7 @@ class PromptMinimizerLangChain:
             msg = self.ollama_minimizer_prompt.format_messages(prompt=inputs["prompt"])
         else:
             msg = self.minimizer_prompt(inputs)
-          
+
         response = self.llm.invoke(msg)
         content = response.content if hasattr(response, "content") else response
         return {**inputs, "new_prompt": content}
@@ -153,19 +162,19 @@ class PromptMinimizerLangChain:
             output = self.llm.invoke(inputs["new_prompt"])
         else:
             output = self.llm.invoke(self.generator_prompt(inputs["new_prompt"]))
-          
+
         content = output.content if hasattr(output, "content") else output
 
         if self.config.verbose:
             print("Generated output:", content)
-          
+
         return {**inputs, "new_output": content}
 
     # Evaluate new prompt and output.
     def evaluate(self, inputs: dict):
         comp_score = self.compression_scorer.compute_score(inputs["new_prompt"], self.original_prompt)
-        bert_score = self.bert_scorer.compute_score([inputs["new_output"]], [self.original_output])[0].item()
-        total_score = (1-bert_score) * self.config.bert_score_weight + comp_score * self.config.compression_weight
+        bert_score = self.bert_scorer.compute_score([inputs["new_output"]], [self.original_output])[0]
+        total_score = (1 - bert_score) * self.config.bert_score_weight + comp_score * self.config.compression_weight
 
         return {**inputs, "score": total_score, "bert_score": bert_score, "compression_score": comp_score}
 
@@ -178,8 +187,7 @@ class PromptMinimizerLangChain:
         history = []
 
         for i in range(self.config.num_iterations):
-            
-            print(f"\n--- Step {i+1} ---")
+            print(f"\n--- Step {i + 1} ---")
             inputs["iteration"] = i + 1
 
             result = self.full_chain.invoke(inputs)
@@ -190,7 +198,7 @@ class PromptMinimizerLangChain:
                   f"Total: {result['score']:.4f}")
 
             inputs["prompt"] = result["new_prompt"]
-            #inputs["output"] = result["new_output"]
+            # inputs["output"] = result["new_output"]
 
         return history
 
@@ -227,34 +235,37 @@ class PromptMinimizerLangChain:
             print(f"Run saved to {self.save_dir / self.run_file}")
 
 
-
 if __name__ == "__main__":
 
     class Config:
         ollama = False
-        model = 'Qwen/Qwen2.5-7B-Instruct'
+        model = 'Qwen/Qwen2.5-32B-Instruct-AWQ'
         temperature = 0.0
         bert_score_weight = 0.5
         compression_weight = 0.5
         num_iterations = 10
-        max_token_length = 1000
+        max_token_length = 32000
         save_run = True
         generate_output = True
         verbose = False
 
+
     temp = PromptMinimizerLangChain(Config())
 
     # Test input
-    #original_prompt = "Explain the process of photosynthesis in simple terms for a 10th grade science class."
-    #original_output = "Photosynthesis is the process plants use to convert sunlight into energy. They take in carbon dioxide and water, and with the help of sunlight, they produce glucose and oxygen."
+    # original_prompt = "Explain the process of photosynthesis in simple terms for a 10th grade science class."
+    # original_output = "Photosynthesis is the process plants use to convert sunlight into energy. They take in carbon dioxide and water, and with the help of sunlight, they produce glucose and oxygen."
 
-    #history = temp(original_prompt, original_output)
+    # history = temp(original_prompt, original_output)
     history_list = []
-    prompt_list = [
-        "Explain the process of photosynthesis in simple terms for a 10th grade science class.",
-        "Explain the process of planetary motion in simple terms for highschool children",
-        "Who won the football world cup in 2014, and who scored the final goal"
-    ]
+    # prompt_list = [
+    #     "Explain the process of photosynthesis in simple terms for a 10th grade science class.",
+    #     "Explain the process of planetary motion in simple terms for highschool children",
+    #     "Who won the football world cup in 2014, and who scored the final goal"
+    # ]
+
+    with open('data/long_prompts.json', 'r') as f:
+        prompt_list = json.load(f)
 
     for prompt in prompt_list:
         out = temp(prompt, None)
@@ -294,7 +305,8 @@ if __name__ == "__main__":
     # Plot ±1 std shading
     plt.fill_between(x, mean_scores - std_scores, mean_scores + std_scores, color='tab:blue', alpha=0.2)
     plt.fill_between(x, mean_bert - std_bert, mean_bert + std_bert, color='tab:orange', alpha=0.2)
-    plt.fill_between(x, mean_compression - std_compression, mean_compression + std_compression, color='tab:green', alpha=0.2)
+    plt.fill_between(x, mean_compression - std_compression, mean_compression + std_compression, color='tab:green',
+                     alpha=0.2)
 
     # Labels & formatting
     plt.xlabel('Iteration')
@@ -306,9 +318,3 @@ if __name__ == "__main__":
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(f"{temp.save_dir}/prompt_minimization_scores.png")
-
-
-
-
-
-

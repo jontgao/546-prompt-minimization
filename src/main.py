@@ -6,6 +6,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Minimization parser')
 
     parser.add_argument('--dataset', type=str, choices=[''], help='Datasets available')
+    parser.add_argument('--run_folder', type=str, default='runs', help='Datasets available')
     parser.add_argument('--model', type=str, default='TinyLlama/TinyLlama-1.1B-Chat-v1.0',
                         help='Model to use for the inference')
     parser.add_argument('--temp', type=float, default=1.0, help='Temperature to use for the inference')
@@ -20,6 +21,8 @@ if __name__ == "__main__":
     parser.add_argument('--max_token_length', type=int, default=1_000, help='Max token length to output')
     parser.add_argument('--method', type=str, choices=['ga', 'agent'], default='ga',
                         help='The optimization algorithm to use')
+    parser.add_argument("--use_initial_output", type=bool, default=True, action=argparse.BooleanOptionalAction,
+                        help="Use the output given, otherwise generate the output from the LLM.")
 
     config = parser.parse_args()
 

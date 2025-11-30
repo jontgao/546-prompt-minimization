@@ -1,3 +1,9 @@
+# Run configs
+runs/
+runs*/
+runs*.zip
+
+
 outcmaes/
 all-logs/
 plot*/

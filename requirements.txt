@@ -8,3 +8,4 @@ langchain-core
 langchain-ollama     # only if using ollama
 langchain-community   # for VLLM support
 bert-score
+seaborn
