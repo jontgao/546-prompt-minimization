@@ -176,21 +176,6 @@ def load_and_preprocess_gsm8k(config, model, cfg="main", max_examples=5):
         user_prompt = question.strip()
         assistant_response = answer.strip()
 
-        chat_input = build_chat_input_for_model(
-            model, 
-            config,
-            user_content=user_prompt,
-            assistant_content=assistant_response
-        )
-
-        chat_input["ground_truth"] = answer.strip()
-
-        processed.append(chat_input)
-        if i + 1 >= max_examples:
-            break
-
-    return processed
-
 def main():
     parser = argparse.ArgumentParser(description="Download and preprocess dataset for a given LLM.")
     parser.add_argument("--model", required=True, help="Model name (e.g. TinyLlama/TinyLlama-1.1B-Chat-v1.0)")
@@ -220,7 +205,6 @@ def main():
     with open(output_path, "w", encoding="utf-8") as f:
         for item in processed_data:
             f.write(json.dumps(item) + "\n")
-
 
     print("Example processed entry:")
     print(json.dumps(processed_data[0], indent=2))
