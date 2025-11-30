@@ -3,7 +3,7 @@
 ###############################################################################
 class Scorer():
     """Base Scorer class to define a standard scoring interface."""
-    
+
     def __init__(self, scorer=None):
         self.scorer = scorer
 
@@ -44,6 +44,7 @@ class Scorer():
         assert len(outputs) == len(expected_outputs), "Output and expected_output lists must be of the same length."
         raise NotImplementedError("Subclasses must implement this method.")
 
+
 ###############################################################################
 # Semantic Similarity Metrics
 ###############################################################################
@@ -56,6 +57,7 @@ class BERTScoreScorer(Scorer):
         _, _, F1 = self.scorer.score(outputs, expected_outputs)
         return F1.tolist()
 
+
 class BLEURTScorer(Scorer):
     def __init__(self, checkpoint='BLEURT-20'):
         from bleurt import score as bleurt_score
@@ -63,6 +65,7 @@ class BLEURTScorer(Scorer):
 
     def _compute_score_output_expected_pairs(self, outputs, expected_outputs):
         return self.scorer.score(references=expected_outputs, candidates=outputs)
+
 
 class SentenceBERTCosineScorer(Scorer):
     def __init__(self, model='all-MiniLM-L6-v2'):
@@ -74,17 +77,21 @@ class SentenceBERTCosineScorer(Scorer):
         ref_emb = self.scorer.encode(expected_outputs)
         return self.scorer.similarity_pairwise(cand_emb, ref_emb).tolist()
 
+
 ###############################################################################
 # Compression Metrics
 ###############################################################################
 class CompressionLengthScorer(Scorer):
     """Compression scorer based on string length (not token counts)."""
+
     def _compute_score_output_expected_pairs(self, outputs, expected_outputs):
         return [float('inf') if len(single_expected_output) == 0 else len(single_output) / len(single_expected_output)
                 for single_output, single_expected_output in zip(outputs, expected_outputs)]
 
+
 class CompressionTokenScorer(Scorer):
     """Compression scorer based on token counts (not string length)."""
+
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
 
@@ -92,18 +99,21 @@ class CompressionTokenScorer(Scorer):
         # TODO: vectorize
         output_tokens = [self.tokenizer.encode(single_output) for single_output in outputs]
         expected_tokens = [self.tokenizer.encode(single_expected_output) for single_expected_output in expected_outputs]
-    
-        return [float('inf') if len(single_expected_output_tokens) == 0 else len(single_output_tokens) / len(single_expected_output_tokens)
+
+        return [float('inf') if len(single_expected_output_tokens) == 0 else len(single_output_tokens) / len(
+            single_expected_output_tokens)
                 for single_output_tokens, single_expected_output_tokens in zip(output_tokens, expected_tokens)]
 
 
 if __name__ == '__main__':
     from transformers import AutoTokenizer
-    scorers = [BERTScoreScorer(), BLEURTScorer(), SentenceBERTCosineScorer(), CompressionLengthScorer(), CompressionTokenScorer(tokenizer=AutoTokenizer.from_pretrained('TinyLlama/TinyLlama-1.1B-Chat-v1.0'))]
+
+    scorers = [BERTScoreScorer(), BLEURTScorer(), SentenceBERTCosineScorer(), CompressionLengthScorer(),
+               CompressionTokenScorer(tokenizer=AutoTokenizer.from_pretrained('TinyLlama/TinyLlama-1.1B-Chat-v1.0'))]
     for scorer in scorers:
         output = ["The cat sat on the mat.", "A quick brown fox jumps over the lazy dog."]
         expected_output = ["The cat is sitting on the mat.", "A fast brown fox leaps over a lazy dog."]
-        
+
         print("\n\nSCORER: ", type(scorer).__name__)
 
         print("Single string input, single string output:", output[0], expected_output[0])

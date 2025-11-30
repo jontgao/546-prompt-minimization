@@ -90,7 +90,6 @@ def load_and_preprocess_dolly(config, split="train", max_examples=5):
     return processed
 
 
-
 def main():
     parser = argparse.ArgumentParser(description="Download and preprocess dataset for a given LLM.")
     parser.add_argument("--model", required=True, help="Model name (e.g. TinyLlama/TinyLlama-1.1B-Chat-v1.0)")
@@ -116,7 +115,6 @@ def main():
     with open(output_path, "w", encoding="utf-8") as f:
         for item in processed_data:
             f.write(json.dumps(item) + "\n")
-
 
     print("Example processed entry:")
     print(json.dumps(processed_data[0], indent=2))

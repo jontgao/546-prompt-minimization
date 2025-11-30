@@ -145,7 +145,7 @@ def make_float_for_prompt(prompt: str,
 
     n = max(1, len(models))
 
-    width_each = f"{1/n - 0.01}\\textwidth"
+    width_each = f"{1 / n - 0.01}\\textwidth"
     # For each model, create a minipage column
     column_blocks = []
     colors = ['myblue', 'myred']
@@ -156,7 +156,7 @@ def make_float_for_prompt(prompt: str,
         block = []
         block.append(r"\begin{minipage}[t]{%s}" % width_each)
         block.append(r"\centering")
-        block.append(fr'\textcolor{{{color}}}{{'+r"\textbf{\small " + latex_escape(m) + r"}}")
+        block.append(fr'\textcolor{{{color}}}{{' + r"\textbf{\small " + latex_escape(m) + r"}}")
         block.append(r"\vspace{2pt}")
         block.append(r'\hrule height 0.8pt')
         block.append(r"\vspace{4pt}")
@@ -182,8 +182,9 @@ def make_float_for_prompt(prompt: str,
                 p = latex_escape(p_raw)
                 # o = latex_escape(truncate_text(o_raw, max_output_chars))
                 block.append(
-                    r"\textbf{Iter %d} {\scriptsize \color{gray} (Score: %.4f $\mid$ Bert: %.4f $\mid$ Comp: %.4f)} \\ " % (it, sc, 1 - scores['bert'],
-                                                                                         scores['compression']))
+                    r"\textbf{Iter %d} {\scriptsize \color{gray} (Score: %.4f $\mid$ Bert: %.4f $\mid$ Comp: %.4f)} \\ " % (
+                        it, sc, 1 - scores['bert'],
+                        scores['compression']))
                 block.append(r'\vspace{1pt}')
                 # Prompt in teletype small
                 block.append(r"\texttt{" + p + r"}\\")
@@ -208,7 +209,8 @@ def make_float_for_prompt(prompt: str,
 
     lines.append(("\n\\hfill\n").join(column_blocks))
     lines.append(r"\vspace{6pt}")
-    lines.append(fr"\caption{{\textbf{{Milestone Discoveries in Prompt Minimization.}} The top panel shows the verbose initial prompt. The bottom panels compare the minimization trajectory of Qwen-32B (Left) and Llama-3.1-8B (Right) using Algorithm from Section \ref{{sec:{sec}}}. Metrics indicate total score, BERT-score, and compression ratio. Running with Temperature {temp}.}}")
+    lines.append(
+        fr"\caption{{\textbf{{Milestone Discoveries in Prompt Minimization.}} The top panel shows the verbose initial prompt. The bottom panels compare the minimization trajectory of Qwen-32B (Left) and Llama-3.1-8B (Right) using Algorithm from Section \ref{{sec:{sec}}}. Metrics indicate total score, BERT-score, and compression ratio. Running with Temperature {temp}.}}")
     lines.append(r"\label{fig:milestones_" + str(abs(hash(prompt)) % (10 ** 8)) + r"}")
     lines.append(r"\end{figure*}")
     lines.append("\n")
@@ -287,4 +289,4 @@ if __name__ == "__main__":
     parser.add_argument("--out", type=str, default="running_best_milestones", help="Output .tex file")
     parser.add_argument("--version", type=str, default="marius", choices=['marius', 'karim', 'li'])
     args = parser.parse_args()
-    main(Path(args.runs_dir + "_" + args.version), Path(args.out + "_"+ args.version + '.tex'), args.version)
+    main(Path(args.runs_dir + "_" + args.version), Path(args.out + "_" + args.version + '.tex'), args.version)

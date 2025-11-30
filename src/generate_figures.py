@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from matplotlib.ticker import LogLocator, MultipleLocator, MaxNLocator
 
 from table_output import compute_milestones, load_run, load_run_karim, discover_runs, discover_runs_karim
 
