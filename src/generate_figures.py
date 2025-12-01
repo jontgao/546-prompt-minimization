@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
-from table_output import compute_milestones, load_run, load_run_karim, discover_runs, discover_runs_karim
+from table_output import compute_milestones, load_run, load_run_karim, load_run_li, discover_runs, discover_runs_karim, discover_runs_li
 
 # Define exact model keys as they appear in your data/logs
 MODEL_KEY_QWEN = "Qwen/Qwen2.5-32B-Instruct-AWQ"
@@ -331,6 +331,8 @@ def load_single(runs_dir: Path, version: str):
         run_folders = discover_runs(runs_dir)
     elif version == 'karim':
         run_folders = discover_runs_karim(runs_dir)
+    elif version == "li":
+        run_folders = discover_runs_li(runs_dir)
     else:
         raise ValueError(f"Unknown version: {version}")
 
@@ -343,6 +345,8 @@ def load_single(runs_dir: Path, version: str):
                 initial_prompt, model_name, events = load_run(rf)
             elif version == 'karim':
                 initial_prompt, model_name, events = load_run_karim(rf)
+            elif version == 'li':
+                initial_prompt, model_name, events = load_run_li(rf)
         except Exception as e:
             # print(f"Skipping {rf} due to error: {e}")
             continue
