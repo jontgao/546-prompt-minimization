@@ -18,7 +18,7 @@ def load_model_config(model_name: str, config_dir: str = "../../config"):
         return json.load(f)
 
 
-def build_chat_input_from_config(config, user_content, assistant_content=None):
+def build_tinyllama_input(config, user_content, assistant_content=None):
     chat_input = {}
 
     if "messages" in config:
@@ -42,6 +42,44 @@ def build_chat_input_from_config(config, user_content, assistant_content=None):
 
     return chat_input
 
+def build_llama3_input(config, user_content, assistant_content=None):
+    B_SYS, E_SYS = "<|start_header_id|>system<|end_header_id|>\n", "<|eot_id|>\n"
+    B_USER, E_USER = "<|start_header_id|>user<|end_header_id|>\n", "<|eot_id|>\n"
+    B_ASSISTANT, E_ASSISTANT = "<|start_header_id|>assistant<|end_header_id|>\n", "<|eot_id|>\n"
+
+    system_prompt = config.get("system_prompt", "You are a helpful assistant.")
+    message = f"<|begin_of_text|>\n{B_SYS}{system_prompt}{E_SYS}"
+
+    message += f"{B_USER}{user_content}{E_USER}"
+    if assistant_content is not None:
+        message += f"{B_ASSISTANT}{assistant_content}{E_ASSISTANT}"
+
+    return {"prompt": message}
+
+def build_qwen_input(config, user_content, assistant_content=None):
+    system_prompt = config.get("system_prompt", "You are a helpful assistant.")
+    messages = [
+        f"<|im_start|>system\n{system_prompt}<|im_end|>",
+        f"<|im_start|>user\n{user_content}<|im_end|>"
+    ]
+
+    if assistant_content is not None:
+        messages.append(f"<|im_start|>assistant\n{assistant_content}<|im_end|>")
+
+    return {"prompt": "\n".join(messages)}
+
+
+def build_chat_input_for_model(model_name, config, user_content, assistant_content=None):
+    if "Llama-3" in model_name or "llama3" in model_name.lower():
+        return build_llama3_input(config, user_content, assistant_content)
+    elif "qwen" in model_name.lower():
+        return build_qwen_input(config, user_content, assistant_content)
+    elif "tinyllama" in model_name.lower():
+        return build_tinyllama_input(config, user_content, assistant_content)
+    else:
+        #some fallback option here, probably
+        return
+
 
 def preprocess_for_chat_model(dataset, config, text_column="text", max_examples=5):
     # Generic fallback
@@ -49,7 +87,7 @@ def preprocess_for_chat_model(dataset, config, text_column="text", max_examples=
 
     for i, sample in enumerate(dataset):
         content = sample.get(text_column) or json.dumps(sample)
-        chat_input = build_chat_input_from_config(config, user_content=content)
+        chat_input = build_chat_input_for_model(config, user_content=content)
         processed.append(chat_input)
         if i + 1 >= max_examples:
             break
@@ -57,7 +95,7 @@ def preprocess_for_chat_model(dataset, config, text_column="text", max_examples=
     return processed
 
 
-def load_and_preprocess_dolly(config, split="train", max_examples=5):
+def load_and_preprocess_dolly(config, model, split="train", max_examples=5):
     dataset = load_dataset("databricks/databricks-dolly-15k", split=split)
     processed = []
 
@@ -75,7 +113,8 @@ def load_and_preprocess_dolly(config, split="train", max_examples=5):
 
         user_prompt = "\n".join(part.strip() for part in user_parts if part.strip())
 
-        chat_input = build_chat_input_from_config(
+        chat_input = build_chat_input_for_model(
+            model, 
             config,
             user_content=user_prompt,
             assistant_content=response
@@ -89,7 +128,53 @@ def load_and_preprocess_dolly(config, split="train", max_examples=5):
 
     return processed
 
+def load_and_preprocess_squad_v2(config, model, split="train", max_examples=5):
+    dataset = load_dataset("squad_v2", split=split)
+    processed = []
 
+    for i, sample in enumerate(dataset):
+        question = sample.get("question", "").strip()
+        context = sample.get("context", "").strip()
+        answers = sample.get("answers", {})
+        answer_texts = answers.get("text", [])
+
+        # SQuAD 2.0 has questions with no answers
+        is_unanswerable = len(answer_texts) == 0
+        ground_truth = answer_texts[0].strip() if not is_unanswerable else "I'm sorry, but this question is unanswerable based on the given context."
+
+        user_prompt = f"Answer the following question based on the context.\n\nContext:\n{context}\n\nQuestion:\n{question}"
+
+        chat_input = build_chat_input_for_model(
+            model, 
+            config,
+            user_content=user_prompt,
+            assistant_content=ground_truth
+        )
+
+        chat_input["ground_truth"] = ground_truth
+        chat_input["unanswerable"] = is_unanswerable
+
+        processed.append(chat_input)
+
+        if i + 1 >= max_examples:
+            break
+
+    return processed
+
+
+def load_and_preprocess_gsm8k(config, model, cfg="main", max_examples=5):
+    dataset = load_dataset("openai/gsm8k", cfg)
+    train_dataset = dataset["train"]
+    #test_dataset = dataset["test"]
+    processed = []
+
+    for i, sample in enumerate(train_dataset):
+        print(f"Sample {i}: {sample}")
+        question = sample.get("question", "")
+        answer = sample.get("answer", "")
+
+        user_prompt = question.strip()
+        assistant_response = answer.strip()
 
 def main():
     parser = argparse.ArgumentParser(description="Download and preprocess dataset for a given LLM.")
@@ -102,13 +187,17 @@ def main():
     config = load_model_config(args.model)
 
     if args.dataset == "databricks/databricks-dolly-15k":
-        processed_data = load_and_preprocess_dolly(config, max_examples=args.max_examples)
+        processed_data = load_and_preprocess_dolly(config, args.model, max_examples=args.max_examples)
+    if args.dataset == "openai/gsm8k":
+        processed_data = load_and_preprocess_gsm8k(config, args.model, max_examples=args.max_examples)
+    if args.dataset == "rajpurkar/squad_v2":
+        processed_data = load_and_preprocess_squad_v2(config, args.model, max_examples=args.max_examples)
     # if needed, add function to handle other datsets HERE
     else:
         print(f"Downloading dataset: {args.dataset}")
         dataset = load_dataset(args.dataset)
         print("Preprocessing dataset...")
-        processed_data = preprocess_for_chat_model(dataset, config, max_examples=args.max_examples)
+        processed_data = preprocess_for_chat_model(dataset, config, args.model, max_examples=args.max_examples)
 
     output_path = Path("../../data") / f"{args.dataset.replace('/', '-')}_{args.model.replace('/', '-')}.jsonl"
 
@@ -116,7 +205,6 @@ def main():
     with open(output_path, "w", encoding="utf-8") as f:
         for item in processed_data:
             f.write(json.dumps(item) + "\n")
-
 
     print("Example processed entry:")
     print(json.dumps(processed_data[0], indent=2))

@@ -1,3 +1,9 @@
+# Run configs
+runs/
+runs*/
+runs*.zip
+
+
 outcmaes/
 all-logs/
 plot*/
@@ -10,6 +16,8 @@ log*/
 tests/compare*/
 analysis/
 plot.png
+
+data/*.jsonl
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
