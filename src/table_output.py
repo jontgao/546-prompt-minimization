@@ -254,7 +254,7 @@ def main(runs_dir: Path, out_file: Path, version: str):
             elif version == 'karim':
                 initial_prompt, model_name, events = load_run_karim(rf)
             elif version == 'li':
-        run_folders = discover_runs_li(runs_dir)
+                initial_prompt, model_name, events = load_run_li(runs_dir)
         except Exception as e:
             print(f"Skipping {rf} due to error: {e}")
             continue

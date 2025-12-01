@@ -37,7 +37,7 @@ class PPOConfig:
     batch_size: int = 4
     mini_batch_size: int = 2
     ppo_epochs: int = 4
-    learning_rate: float = 1e-5
+    learning_rate: float = 1e-4
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
@@ -591,16 +591,16 @@ if __name__ == "__main__":
         output_dir="../runs_li"
     )
     
-    initial_prompt = """
-    As artificial intelligence systems continue integrating into nearly every aspect of daily life—from personalized assistants that anticipate our needs to automated systems that influence hiring, finance, healthcare, and public policy—the question of how humans and machines should coexist becomes increasingly complex. Beyond simply determining when machines should take over tasks, society must grapple with how AI reshapes human agency, autonomy, and social structures. Considering the tradeoffs between convenience, efficiency, and control, how do you envision the ideal balance between human judgment and machine autonomy? What cultural shifts, safeguards, regulatory frameworks, or ethical principles do you believe are necessary to ensure that these technologies enhance human well-being while protecting individual freedoms, preventing algorithmic biases, and preserving meaningful human oversight?
-    """
-    
-    trainer = PromptCompressionPPO(
-        config=config,
-        initial_prompt=initial_prompt
-    )
-    
-    trainer.train()
-    
-    print("LoRA + PPO Prompt Compression System")
+    with open('../data/long_prompts.json', 'r') as f:
+        prompts = json.load(f)
+
+    for prompt in prompts:
+        print(f"Compressing: {prompt}")
+        trainer = PromptCompressionPPO(
+            config=config,
+            initial_prompt=prompt
+        )
+        
+        trainer.train()
+
     print(f"Training complete! Check {trainer.run_dir} for results")
