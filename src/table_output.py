@@ -5,7 +5,7 @@ import json
 import math
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any
 
 LATEX_SPECIALS = {
     '&': r'\&',
@@ -49,9 +49,6 @@ def discover_runs_karim(runs_dir: Path) -> List[Path]:
     patterns = list(runs_dir.glob("*/run*.json"))
     return patterns
 
-def discover_runs_li(runs_dir: Path) -> List[Path]:
-    return [d for d in runs_dir.iterdir() if d.is_dir() and (d / "milestones.jsonl").exists()]
-
 
 def load_run(run_folder: Path):
     meta_path = run_folder / "meta.json"
@@ -87,20 +84,6 @@ def load_run_karim(run_folder: Path):
     model_name = meta.get("model", run_folder.parent.name)
     return initial_prompt, model_name, history
 
-def load_run_li(run_folder: Path) -> Tuple[str, str, List[Dict]]:
-    with open(run_folder / "initial_prompt.txt", "r") as f:
-        initial_prompt = f.read().strip()
-
-    with open(run_folder / "config.json", "r") as f:
-        config = json.load(f)
-        model_name = config['model_name']
-
-    events = []
-    with open(run_folder / "milestones.jsonl", "r") as f:
-        for line in f:
-            events.append(json.loads(line))
-    
-    return initial_prompt, model_name, events
 
 def compute_milestones(events: List[Dict[str, Any]]):
     """
@@ -240,8 +223,6 @@ def main(runs_dir: Path, out_file: Path, version: str):
         run_folders = discover_runs(runs_dir)
     elif version == 'karim':
         run_folders = discover_runs_karim(runs_dir)
-    elif version == 'li':
-        run_folders = discover_runs_li(runs_dir)
     else:
         raise ValueError(f"Unknown version: {version}")
 

@@ -1,607 +1,496 @@
-import json
+import os
+import shutil
+from dataclasses import dataclass, field
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
-from pathlib import Path
-from dataclasses import dataclass, asdict
-from typing import List, Dict, Optional, Tuple
-from datetime import datetime
-import os
-
+from accelerate import PartialState
+from datasets import Dataset
 from transformers import (
-    AutoModelForCausalLM, 
+    AutoModelForCausalLM,
+    AutoModelForSequenceClassification,
     AutoTokenizer,
-    get_linear_schedule_with_warmup
+    HfArgumentParser,
+    DataCollatorWithPadding,
 )
-# really really not a good idea but makes AWQ work?
-# AWQ does not work
-# try:
-#     import transformers.activations
-#     if not hasattr(transformers.activations, "PytorchGELUTanh"):
-#         transformers.activations.PytorchGELUTanh = transformers.activations.NewGELUActivation
-# except ImportError:
-#     pass
 
-from peft import LoraConfig, get_peft_model, TaskType
-
-from metrics import BERTScoreScorer, CompressionLengthScorer
+from trl import (
+    ModelConfig,
+    PPOConfig,
+    PPOTrainer,
+    ScriptArguments,
+    get_peft_config,
+)
+from transformers import PretrainedConfig
+from types import SimpleNamespace
 
 
 @dataclass
-class PPOConfig:
-    model_name: str = "meta-llama/Llama-3.1-8B-Instruct"
+class PromptMinimizationArgs:    
+    compression_ratio_weight: float = field(
+        default=1.0,
+        metadata={"help": "Weight for compression ratio reward (higher = prioritize compression more)"}
+    )
+    quality_weight: float = field(
+        default=1.0,
+        metadata={"help": "Weight for semantic similarity reward (higher = prioritize quality more)"}
+    )
+    num_prompts: int = field(
+        default=100,
+        metadata={"help": "Number of prompts to use for training"}
+    )
+    target_model_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to target model for evaluating compressed prompts"}
+    )
+    quality_eval_frequency: int = field(
+        default=10,
+        metadata={"help": "Evaluate quality every N steps (expensive operation)"}
+    )
+    max_new_tokens: int = field(
+        default=30,
+        metadata={"help": "Number of new tokens to generate"}
+    )
 
-    lora_r: int = 16
-    lora_alpha: int = 32
-    lora_dropout: float = 0.05
-    target_modules: List[str] = None  # Will default to ["q_proj", "v_proj"]
 
-    batch_size: int = 4
-    mini_batch_size: int = 2
-    ppo_epochs: int = 4
-    learning_rate: float = 1e-5
-    gamma: float = 0.99
-    gae_lambda: float = 0.95
-    clip_range: float = 0.2
-    value_loss_coef: float = 0.5
-    entropy_coef: float = 0.01
-    max_grad_norm: float = 0.5
-
-    max_new_tokens: int = 100
-    temperature: float = 0.8
-    top_p: float = 0.9
-
-    num_iterations: int = 15
-    warmup_steps: int = 100
-
-    semantic_weight: float = 0.5
-    compression_weight: float = 0.5
-
-    output_dir: str = "../runs_li"
-    save_every: int = 5
+def create_sample_dataset(num_prompts=100):
+    # dummy dataset
+    base_prompts = [
+        "Please provide a detailed explanation of what machine learning is, including its key concepts and applications.",
+        "I would like to know the capital city of France. Can you tell me what it is?",
+        "Can you explain in detail how the process of photosynthesis works in plants?",
+        "I'm interested in understanding the water cycle. Could you describe the various stages involved?",
+        "What are the main programming paradigms used in software development? Please list and briefly explain each.",
+        "Could you give me a comprehensive definition of artificial intelligence and its subfields?",
+        "I'd like to understand Einstein's theory of relativity. Can you explain it in simple terms?",
+        "Please describe how modern computers work, including the role of the CPU and memory.",
+        "Can you explain the fundamental concept of gravity and how it affects objects?",
+        "What is quantum mechanics? Please provide an overview suitable for beginners.",
+        "I want to understand how the internet works. Can you explain the basic architecture and protocols?",
+        "Could you describe what climate change is and what causes it?",
+        "Please tell me about our solar system, including the planets and their characteristics.",
+        "What are the three laws of thermodynamics? Can you explain each one?",
+        "How does DNA store genetic information? Please explain the structure and function.",
+        "I'm curious about the stock market. Can you explain how it works and what affects stock prices?",
+        "Could you provide an explanation of blockchain technology and how it's used in cryptocurrencies?",
+        "What is Darwin's theory of natural selection? Please explain how evolution works.",
+        "How do vaccines work to protect against diseases? Please explain the mechanism.",
+        "Can you describe the scientific method and why it's important for research?",
+    ]
     
-    def __post_init__(self):
-        if self.target_modules is None:
-            self.target_modules = ["q_proj", "v_proj", "k_proj", "o_proj"]
-
-
-class ExperienceBuffer:
-    def __init__(self):
-        self.prompts = []
-        self.responses = []
-        self.log_probs = []
-        self.values = []
-        self.rewards = []
-        self.dones = []
-        self.feedback = []
+    prompts = (base_prompts * ((num_prompts // len(base_prompts)) + 1))[:num_prompts]
     
-    def add(self, prompt, response, log_prob, value, reward, feedback="", done=False):
-        self.prompts.append(prompt)
-        self.responses.append(response)
-        self.log_probs.append(log_prob)
-        self.values.append(value)
-        self.rewards.append(reward)
-        self.feedback.append(feedback)
-        self.dones.append(done)
-    
-    def clear(self):
-        self.prompts.clear()
-        self.responses.clear()
-        self.log_probs.clear()
-        self.values.clear()
-        self.rewards.clear()
-        self.feedback.clear()
-        self.dones.clear()
-    
-    def get(self):
-        return {
-            'prompts': self.prompts,
-            'responses': self.responses,
-            'log_probs': torch.stack(self.log_probs),
-            'values': torch.stack(self.values),
-            'rewards': torch.tensor(self.rewards),
-            'feedback': self.feedback,
-            'dones': torch.tensor(self.dones)
-        }
+    return Dataset.from_dict({"prompt": prompts})
 
 
-class ValueHead(torch.nn.Module):    
-    def __init__(self, hidden_size: int):
+class DummyBackbone(torch.nn.Module):
+    # Dummy backbone that mimics a transformer model for TRL compatibility
+    def __init__(self, hidden_size=768):
         super().__init__()
-        self.value_head = torch.nn.Sequential(
-            torch.nn.Linear(hidden_size, hidden_size // 2),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_size // 2, 1)
-        )
+        self.hidden_size = hidden_size
+        self.dummy = torch.nn.Linear(1, 1)
     
-    def forward(self, hidden_states):
-        return self.value_head(hidden_states).squeeze(-1)
+    def forward(self, input_ids, attention_mask=None, **kwargs):
+        batch_size, seq_len = input_ids.shape
+        device = input_ids.device
+        hidden_states = torch.zeros(batch_size, seq_len, self.hidden_size, device=device)
 
-
-class PromptCompressionPPO:    
-    def __init__(
-        self, 
-        config: PPOConfig,
-        initial_prompt: str
-    ):
-        self.config = config
-        self.initial_prompt = initial_prompt
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        self.semantic_scorer = BERTScoreScorer()
-        self.compression_scorer = CompressionLengthScorer()
-
-        self._init_model()
-
-        self.run_dir = self._create_run_dir()
-
-        self.milestones = []
-        self.iteration = 0
-        self.last_feedback = None
-        
-    def _init_model(self):
-        print(f"Loading model: {self.config.model_name}")
-
-        self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_name)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        dtype = torch.float16
-        if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
-            print("Using bfloat16 for stability")
-            dtype = torch.bfloat16
-
-        base_model = AutoModelForCausalLM.from_pretrained(
-            self.config.model_name,
-            torch_dtype=dtype,
-            device_map="auto"
+        return SimpleNamespace(
+            last_hidden_state=hidden_states,
+            hidden_states=(hidden_states,)
         )
 
-        lora_config = LoraConfig(
-            r=self.config.lora_r,
-            lora_alpha=self.config.lora_alpha,
-            target_modules=self.config.target_modules,
-            lora_dropout=self.config.lora_dropout,
-            bias="none",
-            task_type=TaskType.CAUSAL_LM
-        )
 
-        self.model = get_peft_model(base_model, lora_config)
-        self.model.print_trainable_parameters()
+class PromptCompressionRewardModel(torch.nn.Module):
+    #should eventually import from metrics/ folder
+    def __init__(self, target_model, tokenizer, compression_ratio_weight=1.0, 
+                 quality_weight=1.0, quality_eval_frequency=10):
+        super().__init__()
+        self.target_model = target_model
+        self.tokenizer = tokenizer
+        self.compression_ratio_weight = compression_ratio_weight
+        self.quality_weight = quality_weight
+        self.quality_eval_frequency = quality_eval_frequency
 
-        hidden_size = self.model.config.hidden_size
-        self.value_head = ValueHead(hidden_size).to(self.device).to(base_model.dtype)
+        self.original_prompts = {}
+        self.step_counter = 0
 
-        self.optimizer = torch.optim.AdamW(
-            list(self.model.parameters()) + list(self.value_head.parameters()),
-            lr=self.config.learning_rate
-        )
-
-        total_steps = self.config.num_iterations * self.config.ppo_epochs
-        self.scheduler = get_linear_schedule_with_warmup(
-            self.optimizer,
-            num_warmup_steps=self.config.warmup_steps,
-            num_training_steps=total_steps
-        )
+        self.config = PretrainedConfig()
+        self.config.hidden_size = 768
+        self.base_model_prefix = 'model'
+        self.model = DummyBackbone(hidden_size=768)
+        self.score = torch.nn.Linear(self.config.hidden_size, 1, bias=False)
     
-    def _create_run_dir(self) -> Path:
-        """Create directory for this run."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        model_name = self.config.model_name.replace("/", "_")
-        prompt_hash = hash(self.initial_prompt) % 10000
-        
-        run_dir = Path(self.config.output_dir) / f"{model_name}_prompt{prompt_hash}_{timestamp}"
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        with open(run_dir / "config.json", "w") as f:
-            json.dump(asdict(self.config), f, indent=2)
-
-        with open(run_dir / "initial_prompt.txt", "w") as f:
-            f.write(self.initial_prompt)
-        
-        return run_dir
+    def set_original_prompts(self, batch_idx, prompts):
+        for i, prompt in enumerate(prompts):
+            self.original_prompts[f"{batch_idx}_{i}"] = prompt
     
-    def generate_response(
-        self, 
-        prompt: str, 
-        return_log_probs: bool = False,
-        deterministic: bool = False
-    ) -> Tuple[str, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        if self.last_feedback and self.iteration > 0:
-            formatted_prompt = f"""Task: Compress the following prompt while preserving its meaning.
+    def clean_compressed_output(self, text):
+        text = text.split('\n')[0].strip()
 
-Original Prompt: {prompt}
+        if '→' in text:
+            text = text.split('→')[0].strip()
 
-Previous Attempt Feedback:
-{self.last_feedback}
+        text = text.strip('"\'')
 
-Taking this feedback into account, provide an improved compressed version:
-
-Compressed Prompt:"""
-        else:
-            formatted_prompt = f"""Task: Compress the following prompt while preserving its meaning.
-
-Original Prompt: {prompt}
-
-Compressed Prompt:"""
+        prefixes = ['Compressed:', 'Output:', 'Result:']
+        for prefix in prefixes:
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
         
-        inputs = self.tokenizer(
-            formatted_prompt, 
-            return_tensors="pt", 
-            padding=True
-        ).to(self.device)
-
-        if deterministic:
+        return text
+    
+    def compute_semantic_similarity(self, compressed_text, original_text):
+        try:
             with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=self.config.max_new_tokens,
+                orig_inputs = self.tokenizer(
+                    original_text, 
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=512
+                ).to(self.target_model.device)
+                
+                orig_outputs = self.target_model.generate(
+                    **orig_inputs,
+                    max_new_tokens=30, #could increase this
                     do_sample=False,
-                    pad_token_id=self.tokenizer.pad_token_id
+                    pad_token_id=self.tokenizer.pad_token_id,
                 )
-            generated_ids = outputs[0][inputs.input_ids.shape[1]:]
-            response = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-            return response.strip(), None, None
-        
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=self.config.max_new_tokens,
-                temperature=self.config.temperature,
-                top_p=self.config.top_p,
-                do_sample=True,
-                pad_token_id=self.tokenizer.pad_token_id,
-                output_scores=return_log_probs,
-                return_dict_in_generate=return_log_probs
-            )
 
-        if return_log_probs:
-            generated_ids = outputs.sequences[0][inputs.input_ids.shape[1]:]
-            response = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+                comp_inputs = self.tokenizer(
+                    compressed_text, 
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=512
+                ).to(self.target_model.device)
+                
+                comp_outputs = self.target_model.generate(
+                    **comp_inputs,
+                    max_new_tokens=30,
+                    do_sample=False,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
 
-            logits = torch.stack(outputs.scores, dim=0)
-            log_probs = F.log_softmax(logits[:, 0, :], dim=-1)
-            token_log_probs = log_probs[range(len(generated_ids)), generated_ids]
-            avg_log_prob = token_log_probs.mean()
-
-            with torch.no_grad():
-                full_outputs = self.model(outputs.sequences, output_hidden_states=True)
-                last_hidden = full_outputs.hidden_states[-1][0, -1, :]
-                value = self.value_head(last_hidden)
-            
-            return response.strip(), avg_log_prob, value
-        else:
-            generated_ids = outputs[0][inputs.input_ids.shape[1]:]
-            response = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-            return response.strip(), None, None
+                orig_tokens = set(orig_outputs[0].cpu().tolist())
+                comp_tokens = set(comp_outputs[0].cpu().tolist())
+                
+                if len(orig_tokens) == 0 and len(comp_tokens) == 0:
+                    return 1.0
+                
+                intersection = len(orig_tokens.intersection(comp_tokens))
+                union = len(orig_tokens.union(comp_tokens))
+                
+                similarity = intersection / union if union > 0 else 0.0
+                return similarity
+                
+        except Exception as e:
+            print(f"Error computing similarity: {e}")
+            return 0.0
     
-    def compute_log_probs_and_values(self, prompt: str, response: str) -> Tuple[torch.Tensor, torch.Tensor]:
-        if self.last_feedback and self.iteration > 0:
-            formatted_prompt = f"""Task: Compress the following prompt while preserving its meaning.
+    def forward(self, input_ids, attention_mask=None, original_prompts=None, **kwargs):
+        batch_size = input_ids.shape[0]
+        rewards = []
+        self.step_counter += 1
 
-Original Prompt: {prompt}
-
-Previous Attempt Feedback:
-{self.last_feedback}
-
-Taking this feedback into account, provide an improved compressed version:
-
-Compressed Prompt:"""
-        else:
-            formatted_prompt = f"""Task: Compress the following prompt while preserving its meaning.
-
-Original Prompt: {prompt}
-
-Compressed Prompt:"""
-
-        full_text = formatted_prompt + " " + response
-        inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(self.device)
-        full_inputs = self.tokenizer(full_text, return_tensors="pt").to(self.device)
-
-        outputs = self.model(**full_inputs, output_hidden_states=True)
-        logits = outputs.logits
-        hidden_states = outputs.hidden_states[-1]
-
-        response_tokens = self.tokenizer.encode(response, add_special_tokens=False)
-        prompt_len = inputs.input_ids.shape[1]
-
-        response_logits = logits[0, prompt_len-1:prompt_len-1+len(response_tokens), :]
-        log_probs = F.log_softmax(response_logits, dim=-1)
-
-        token_log_probs = []
-        for i, token_id in enumerate(response_tokens):
-            if i < log_probs.shape[0]:
-                token_log_probs.append(log_probs[i, token_id])
+        compute_quality = (self.step_counter % self.quality_eval_frequency == 0)
         
-        if token_log_probs:
-            avg_log_prob = torch.stack(token_log_probs).mean()
-        else:
-            avg_log_prob = torch.tensor(0.0, device=self.device, requires_grad=True)
-
-        last_hidden = hidden_states[0, -1, :]
-        value = self.value_head(last_hidden)
-        
-        return avg_log_prob, value
-
-    def compute_reward(self, compressed_prompt: str) -> Tuple[Dict[str, float], str]:
-        semantic_score = self.semantic_scorer.compute_score(
-            compressed_prompt, 
-            self.initial_prompt
-        )
-
-        compression_ratio = self.compression_scorer.compute_score(
-            compressed_prompt,
-            self.initial_prompt
-        )
-
-        compression_reward = max(0, 1.0 - compression_ratio)
-
-        total_reward = (
-            self.config.semantic_weight * semantic_score +
-            self.config.compression_weight * compression_reward
-        )
-
-        feedback = self._generate_feedback(
-            semantic_score, 
-            compression_ratio, 
-            compressed_prompt
-        )
-        
-        reward_dict = {
-            'total': float(total_reward),
-            'semantic': float(semantic_score),
-            'compression': float(compression_ratio),
-            'compression_reward': float(compression_reward)
-        }
-        
-        return reward_dict, feedback
-    
-    def _generate_feedback(
-        self, 
-        semantic_score: float, 
-        compression_ratio: float,
-        compressed_prompt: str
-    ) -> str:
-        original_len = len(self.initial_prompt)
-        compressed_len = len(compressed_prompt)
-        
-        feedback_parts = []
-
-        if semantic_score >= 0.9:
-            feedback_parts.append(f" Excellent semantic preservation (score: {semantic_score:.3f}). The meaning is well maintained.")
-        elif semantic_score >= 0.75:
-            feedback_parts.append(f" Good semantic preservation (score: {semantic_score:.3f}), but some meaning may be lost.")
-        elif semantic_score >= 0.6:
-            feedback_parts.append(f" Moderate semantic preservation (score: {semantic_score:.3f}). Important details are being lost.")
-        else:
-            feedback_parts.append(f" Poor semantic preservation (score: {semantic_score:.3f}). Too much meaning has been lost.")
-
-        compression_pct = (1 - compression_ratio) * 100
-        if compression_ratio < 0.5:
-            feedback_parts.append(f" Excellent compression ({compression_pct:.1f}% reduction, {compressed_len}/{original_len} chars).")
-        elif compression_ratio < 0.7:
-            feedback_parts.append(f" Good compression ({compression_pct:.1f}% reduction, {compressed_len}/{original_len} chars).")
-        elif compression_ratio < 0.9:
-            feedback_parts.append(f" Modest compression ({compression_pct:.1f}% reduction, {compressed_len}/{original_len} chars). Can compress more.")
-        else:
-            feedback_parts.append(f" Minimal compression ({compression_pct:.1f}% reduction, {compressed_len}/{original_len} chars). Compress more aggressively.")
-
-        if semantic_score >= 0.8 and compression_ratio < 0.6:
-            feedback_parts.append("→ Excellent balance! This is a high-quality compression.")
-        elif semantic_score < 0.7:
-            feedback_parts.append("→ Focus on preserving more of the original meaning and key details.")
-        elif compression_ratio > 0.8:
-            feedback_parts.append("→ Focus on being more concise. Remove redundant words and use shorter phrases.")
-        else:
-            feedback_parts.append("→ Try to improve both compression and semantic preservation.")
-        
-        return " ".join(feedback_parts)
-    
-    def compute_advantages(self, rewards, values, dones):
-        advantages = torch.zeros_like(rewards)
-        last_advantage = 0
-
-        dones_float = dones.float()
-        
-        for t in reversed(range(len(rewards))):
-            if t == len(rewards) - 1:
-                next_value = 0
+        for i in range(batch_size):
+            if attention_mask is not None:
+                output_length = attention_mask[i].sum().item()
             else:
-                next_value = values[t + 1]
+                output_length = input_ids.shape[1]
+
+            compressed_text = self.tokenizer.decode(input_ids[i], skip_special_tokens=True)
+            compressed_text = self.clean_compressed_output(compressed_text)
+
+            output_length = len(self.tokenizer.encode(compressed_text, add_special_tokens=False))
+
+            if original_prompts and i < len(original_prompts):
+                original_text = original_prompts[i]
+                original_length = len(self.tokenizer.encode(original_text, add_special_tokens=False))
+            else:
+                #fallback
+                original_length = 100
+
+            compression_ratio = max(0.0, (original_length - output_length) / original_length)
+            compression_reward = compression_ratio * self.compression_ratio_weight
+
+            if compute_quality and original_prompts and i < len(original_prompts):
+                quality_score = self.compute_semantic_similarity(compressed_text, original_prompts[i])
+                quality_reward = quality_score * self.quality_weight
+                
+                if i == 0:
+                    print(f"\n[Quality Check] Original: '{original_prompts[i][:50]}...'")
+                    print(f"[Quality Check] Compressed: '{compressed_text[:50]}...'")
+                    print(f"[Quality Check] Similarity: {quality_score:.3f}, Compression: {compression_ratio:.3f}")
+            else:
+                # fallback
+                quality_reward = 0.5 * self.quality_weight
             
-            delta = rewards[t] + self.config.gamma * next_value * (1 - dones_float[t]) - values[t]
-            advantages[t] = last_advantage = delta + self.config.gamma * self.config.gae_lambda * (1 - dones_float[t]) * last_advantage
+            total_reward = compression_reward + quality_reward
+            rewards.append([total_reward])
+
+        logits = torch.tensor(rewards, dtype=torch.float32, device=input_ids.device)
         
-        returns = advantages + values
-        return advantages, returns
-    
-    def ppo_update(self, buffer: ExperienceBuffer):
-        data = buffer.get()
-        
-        old_log_probs = data['log_probs'].to(self.device).detach()
-        old_values = data['values'].to(self.device).detach()
-        rewards = data['rewards'].to(self.device)
-        dones = data['dones'].to(self.device)
+        from transformers.modeling_outputs import SequenceClassifierOutput
+        return SequenceClassifierOutput(logits=logits)
 
-        advantages, returns = self.compute_advantages(rewards, old_values, dones)
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-        for _ in range(self.config.ppo_epochs):
-            new_log_probs = []
-            new_values = []
-            
-            for prompt, response in zip(data['prompts'], data['responses']):
-                log_prob, value = self.compute_log_probs_and_values(prompt, response)
-                new_log_probs.append(log_prob)
-                new_values.append(value)
-            
-            new_log_probs = torch.stack(new_log_probs)
-            new_values = torch.stack(new_values)
-
-            if advantages.dtype != new_log_probs.dtype:
-                advantages = advantages.to(new_log_probs.dtype)
-            if returns.dtype != new_values.dtype:
-                returns = returns.to(new_values.dtype)
-            if old_log_probs.dtype != new_log_probs.dtype:
-                old_log_probs = old_log_probs.to(new_log_probs.dtype)
-
-            ratio = torch.exp(new_log_probs - old_log_probs)
-            surr1 = ratio * advantages
-            surr2 = torch.clamp(ratio, 1 - self.config.clip_range, 1 + self.config.clip_range) * advantages
-            policy_loss = -torch.min(surr1, surr2).mean()
-
-            value_loss = F.mse_loss(new_values, returns)
-
-            entropy = -(new_log_probs * torch.exp(new_log_probs)).mean()
-
-            loss = (
-                policy_loss + 
-                self.config.value_loss_coef * value_loss - 
-                self.config.entropy_coef * entropy
-            )
-
-            self.optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                list(self.model.parameters()) + list(self.value_head.parameters()),
-                self.config.max_grad_norm
-            )
-            self.optimizer.step()
-            self.scheduler.step()
-        
-        return {
-            'policy_loss': policy_loss.item(),
-            'value_loss': value_loss.item(),
-            'entropy': entropy.item(),
-            'total_loss': loss.item()
-        }
-    
-    def train_iteration(self):
-        buffer = ExperienceBuffer()
-
-        iteration_feedbacks = []
-        for _ in range(self.config.batch_size):
-            compressed, log_prob, value = self.generate_response(
-                self.initial_prompt, 
-                return_log_probs=True
-            )
-            
-            reward_dict, feedback = self.compute_reward(compressed)
-            iteration_feedbacks.append(feedback)
-            
-            buffer.add(
-                prompt=self.initial_prompt,
-                response=compressed,
-                log_prob=log_prob,
-                value=value,
-                reward=reward_dict['total'],
-                feedback=feedback,
-                done=False
-            )
-
-        loss_dict = self.ppo_update(buffer)
-
-        best_idx = torch.argmax(torch.tensor(buffer.rewards)).item()
-        best_compressed = buffer.responses[best_idx]
-        best_feedback = iteration_feedbacks[best_idx]
-        best_reward_dict, _ = self.compute_reward(best_compressed)
-
-        self.last_feedback = best_feedback
-        
-        milestone = {
-            'iteration': self.iteration,
-            'compressed_prompt': best_compressed,
-            'score': 1.0 - best_reward_dict['total'],
-            'scores': {
-                'semantic': float(best_reward_dict['semantic']),
-                'compression': float(best_reward_dict['compression']),
-            },
-            'reward': best_reward_dict['total'],
-            'feedback': best_feedback,
-            'loss': loss_dict
-        }
-        
-        self.milestones.append(milestone)
-        self._save_milestone(milestone)
-        
-        print(f"Iteration {self.iteration}: Score={milestone['score']:.4f}, "
-              f"Compression={best_reward_dict['compression']:.4f}, "
-              f"Semantic={best_reward_dict['semantic']:.4f}")
-        print(f"Feedback: {best_feedback}")
-        
-        self.iteration += 1
-        buffer.clear()
-    
-    def _save_milestone(self, milestone: Dict):
-        log_file = self.run_dir / "milestones.jsonl"
-        with open(log_file, "a") as f:
-            f.write(json.dumps(milestone) + "\n")
-    
-    def save_checkpoint(self):
-        checkpoint_dir = self.run_dir / f"checkpoint_{self.iteration}"
-        checkpoint_dir.mkdir(exist_ok=True)
-
-        self.model.save_pretrained(checkpoint_dir)
-
-        torch.save(
-            self.value_head.state_dict(),
-            checkpoint_dir / "value_head.pt"
-        )
-        
-        print(f"Checkpoint saved to {checkpoint_dir}")
-    
-    def train(self):
-        print(f"Starting training for {self.config.num_iterations} iterations")
-        print(f"Output directory: {self.run_dir}")
-        
-        for iteration in range(self.config.num_iterations):
-            self.train_iteration()
-            
-            if (iteration + 1) % self.config.save_every == 0:
-                self.save_checkpoint()
-
-        self.save_checkpoint()
-        print(f"Training complete! Results saved to {self.run_dir}")
-
-        if self.milestones:
-            best_milestone = max(self.milestones, key=lambda x: x['reward'])
-            
-            print("\n" + "="*50)
-            print("TRAINING COMPLETE - BEST RESULT")
-            print("="*50)
-            print(f"Iteration: {best_milestone['iteration']}")
-            print(f"Score: {best_milestone['score']:.4f} (Lower is better)")
-            print(f"Reward: {best_milestone['reward']:.4f}")
-            print(f"Compression Score: {best_milestone['scores']['compression']:.4f}")
-            print(f"Semantic Score: {best_milestone['scores']['semantic']:.4f}")
-            print("-"*20)
-            print(f"Original Prompt:\n{self.initial_prompt}")
-            print("-"*20)
-            print(f"Best Compressed Prompt:\n{best_milestone['compressed_prompt']}")
-            print("="*50 + "\n")
-
-            best_result_path = self.run_dir / "best_result.json"
-            with open(best_result_path, "w") as f:
-                json.dump(best_milestone, f, indent=2)
-            print(f"Best result details saved to {best_result_path}")
 
 if __name__ == "__main__":
-    config = PPOConfig(
-        model_name="meta-llama/Llama-3.1-8B-Instruct",
-        num_iterations=15,
-        batch_size=4,
-        output_dir="../runs_li"
+    parser = HfArgumentParser((ScriptArguments, PPOConfig, ModelConfig, PromptMinimizationArgs))
+    script_args, training_args, model_args, prompt_args = parser.parse_args_into_dataclasses()
+
+    shutil.rmtree(training_args.output_dir, ignore_errors=True)
+
+    model_name = model_args.model_name_or_path or "EleutherAI/pythia-6.9b"
+
+    print(f"Loading tokenizer from {model_name}...")
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        padding_side="left",
+        trust_remote_code=model_args.trust_remote_code
     )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        print(f"Set pad_token to eos_token: {tokenizer.eos_token}")
     
-    initial_prompt = """
-    As artificial intelligence systems continue integrating into nearly every aspect of daily life—from personalized assistants that anticipate our needs to automated systems that influence hiring, finance, healthcare, and public policy—the question of how humans and machines should coexist becomes increasingly complex. Beyond simply determining when machines should take over tasks, society must grapple with how AI reshapes human agency, autonomy, and social structures. Considering the tradeoffs between convenience, efficiency, and control, how do you envision the ideal balance between human judgment and machine autonomy? What cultural shifts, safeguards, regulatory frameworks, or ethical principles do you believe are necessary to ensure that these technologies enhance human well-being while protecting individual freedoms, preventing algorithmic biases, and preserving meaningful human oversight?
-    """
+    print(f"Tokenizer vocab size: {len(tokenizer)}")
+
+    is_chat_model = hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is not None
+    print(f"Chat model detected: {is_chat_model}")
+
+    dtype = model_args.dtype if model_args.dtype in ["auto", None] else getattr(torch, model_args.dtype)
     
-    trainer = PromptCompressionPPO(
-        config=config,
-        initial_prompt=initial_prompt
+    model_kwargs = dict(
+        revision=model_args.model_revision,
+        attn_implementation=model_args.attn_implementation,
+        torch_dtype=dtype,
+        trust_remote_code=model_args.trust_remote_code,
+        device_map="auto",
     )
+
+    sft_model_path = training_args.sft_model_path or model_name
+    print(f"Loading policy model from {sft_model_path}...")
+    policy = AutoModelForCausalLM.from_pretrained(
+        sft_model_path,
+        **model_kwargs
+    )
+    print(f"Policy model loaded. Vocab size: {policy.config.vocab_size}")
+
+    peft_config = get_peft_config(model_args)
+
+    if peft_config is None:
+        ref_policy = AutoModelForCausalLM.from_pretrained(
+            sft_model_path,
+            **model_kwargs
+        )
+    else:
+        ref_policy = None
+        print("Using PEFT (LoRA) - no separate reference model needed")
+
+    target_model_path = prompt_args.target_model_path or model_name
+    print(f"Loading target model from {target_model_path}...")
+    target_model = AutoModelForCausalLM.from_pretrained(
+        target_model_path,
+        **model_kwargs
+    )
+    target_model.eval()
+
+    print("Creating prompt compression reward model...")
+    reward_model = PromptCompressionRewardModel(
+        target_model=target_model,
+        tokenizer=tokenizer,
+        compression_ratio_weight=prompt_args.compression_ratio_weight,
+        quality_weight=prompt_args.quality_weight,
+        quality_eval_frequency=prompt_args.quality_eval_frequency,
+    )
+
+    print("Loading value model...")
+    value_model_path = training_args.reward_model_path or "EleutherAI/pythia-160m"
+    try:
+        value_model = AutoModelForSequenceClassification.from_pretrained(
+            value_model_path,
+            trust_remote_code=model_args.trust_remote_code,
+            num_labels=1,
+        )
+    except:
+        print(f"Could not load {value_model_path} as sequence classifier, using policy model base...")
+        from transformers import AutoConfig
+        config = AutoConfig.from_pretrained(sft_model_path)
+        config.num_labels = 1
+        value_model = AutoModelForSequenceClassification.from_pretrained(
+            sft_model_path,
+            config=config,
+            ignore_mismatched_sizes=True,
+            trust_remote_code=model_args.trust_remote_code,
+        )
+
+    if script_args.dataset_name:
+        from datasets import load_dataset
+        dataset = load_dataset(
+            script_args.dataset_name,
+            name=script_args.dataset_config,
+            split=script_args.dataset_train_split
+        )
+        dataset_text_field = "prompt"
+    else:
+        dataset = create_sample_dataset(prompt_args.num_prompts)
+        dataset_text_field = "prompt"
+        print(f"Using sample dataset with {len(dataset)} prompts")
+
+    eval_samples = min(20, len(dataset) // 10)
+    train_dataset = dataset.select(range(len(dataset) - eval_samples))
+    eval_dataset = dataset.select(range(len(dataset) - eval_samples, len(dataset)))
+
+    def prepare_dataset(dataset, tokenizer, is_chat_model):
+        def tokenize(element):
+            prompts = element[dataset_text_field]
+            original_prompts_list = prompts.copy()
+
+            original_lengths = [len(tokenizer.encode(p, add_special_tokens=False)) for p in prompts]
+
+            formatted_prompts = []
+            #few shot prompt with clear stop →
+            for p in prompts:
+                few_shot_template = """Compress these prompts by removing unnecessary words:
+
+"Please provide a detailed explanation of what machine learning is" → "Explain machine learning"
+"I would like to know the capital city of France" → "Capital of France?"
+"{prompt}" →"""
+                
+                formatted = few_shot_template.format(prompt=p)
+                formatted_prompts.append(formatted)
+
+            if is_chat_model:
+                chat_prompts = []
+                for prompt in formatted_prompts:
+                    messages = [{"role": "user", "content": prompt}]
+                    formatted = tokenizer.apply_chat_template(
+                        messages, 
+                        tokenize=False, 
+                        add_generation_prompt=True
+                    )
+                    chat_prompts.append(formatted)
+                formatted_prompts = chat_prompts
+            
+            outputs = tokenizer(
+                formatted_prompts,
+                padding=False,
+                truncation=True,
+                max_length=512,
+            )
+
+            outputs["original_prompt_text"] = original_prompts_list
+            outputs["original_length"] = original_lengths
+            
+            return outputs
+
+        return dataset.map(
+            tokenize,
+            batched=True,
+            remove_columns=dataset.column_names,
+            num_proc=training_args.dataset_num_proc,
+        )
+
+    with PartialState().local_main_process_first():
+        train_dataset = prepare_dataset(train_dataset, tokenizer, is_chat_model)
+        eval_dataset = prepare_dataset(eval_dataset, tokenizer, is_chat_model)
+
+    train_original_prompts = train_dataset["original_prompt_text"]
+
+    if "original_prompt_text" in train_dataset.column_names:
+        train_dataset = train_dataset.remove_columns(["original_prompt_text", "original_length"])
+    if "original_prompt_text" in eval_dataset.column_names:
+        eval_dataset = eval_dataset.remove_columns(["original_prompt_text", "original_length"])
+
+    print("\n" + "="*50)
+    print("Testing generation BEFORE training:")
+    print("="*50)
+    test_prompt = "Please provide a detailed explanation of what machine learning is, including its key concepts and applications."
+    
+    few_shot_template = """Compress these prompts by removing unnecessary words:
+
+"Please provide a detailed explanation of what machine learning is" → "Explain machine learning"
+"I would like to know the capital city of France" → "Capital of France?"
+"{prompt}" →"""
+    
+    formatted_test = few_shot_template.format(prompt=test_prompt)
+    
+    if is_chat_model:
+        messages = [{"role": "user", "content": formatted_test}]
+        formatted_test = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        
+    test_inputs = tokenizer(formatted_test, return_tensors="pt")
+    test_inputs = {k: v.to(policy.device) for k, v in test_inputs.items()}
+    
+    print(f"Original prompt ({len(tokenizer.encode(test_prompt))} tokens): {test_prompt}")
+    print(f"\nGenerating compressed version...")
+    with torch.no_grad():
+        test_outputs = policy.generate(
+            **test_inputs,
+            max_new_tokens=prompt_args.max_new_tokens,
+            temperature=0.7,
+            do_sample=True,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            top_p=0.9,
+            stop_strings=["\n", "→"],
+            tokenizer=tokenizer,
+        )
+
+    generated_ids = test_outputs[0][len(test_inputs['input_ids'][0]):]
+    compressed = tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+    compressed = compressed.split('\n')[0].strip()
+    if '→' in compressed:
+        compressed = compressed.split('→')[0].strip()
+    compressed = compressed.strip('"\'')
+    
+    compressed_length = len(tokenizer.encode(compressed, add_special_tokens=False))
+    original_length = len(tokenizer.encode(test_prompt, add_special_tokens=False))
+    compression_ratio = (original_length - compressed_length) / original_length if original_length > 0 else 0
+    
+    print(f"Compressed prompt ({compressed_length} tokens): {compressed}")
+    print(f"Compression ratio: {compression_ratio:.2%} (original: {original_length} → compressed: {compressed_length})")
+    print("="*50 + "\n")
+
+    class CustomPPOTrainer(PPOTrainer):
+        def __init__(self, *args, original_prompts=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.original_prompts = original_prompts
+            self.batch_counter = 0
+        
+        def compute_rewards(self, scores, logprobs, ref_logprobs, masks):
+            """Override to pass original prompts to reward model"""
+            return super().compute_rewards(scores, logprobs, ref_logprobs, masks)
+    
+    trainer = PPOTrainer(
+        args=training_args,
+        processing_class=tokenizer,
+        model=policy,
+        ref_model=ref_policy,
+        reward_model=reward_model,
+        value_model=value_model,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        peft_config=peft_config,
+    )
+
+    reward_model.original_prompts_list = train_original_prompts
+    
+    print("Starting PPO training for prompt compression...")
+    print(f"Compression ratio weight: {prompt_args.compression_ratio_weight}")
+    print(f"Quality weight: {prompt_args.quality_weight}")
+    print(f"Quality eval frequency: every {prompt_args.quality_eval_frequency} steps")
+    print(f"Goal: Maximize compression ratio while maintaining quality")
+    print(f"KL coefficient: {training_args.kl_coef}")
+    print(f"Learning rate: {training_args.learning_rate}")
     
     trainer.train()
-    
-    print("LoRA + PPO Prompt Compression System")
-    print(f"Training complete! Check {trainer.run_dir} for results")
+
+    # print(f"\nSaving model to {training_args.output_dir}")
+    # trainer.save_model(training_args.output_dir)
+
+    # print("\nGenerating sample compressed prompts...")
+    # trainer.generate_completions()
