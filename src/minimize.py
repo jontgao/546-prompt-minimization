@@ -9,6 +9,9 @@ DEFAULT_LLM = 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
 
 from src.metrics import BERTScoreScorer, CompressionLengthScorer
 
+def stable_hash(s: str) -> str:
+    return hashlib.sha256(s.encode('utf-8')).hexdigest()
+
 
 class MultiStageOptimization:
     def __init__(self, config):

@@ -44,11 +44,10 @@ class SentenceBERTCosineScorer(Scorer):
         super().__init__(scorer=SentenceTransformer(model))
         self._cos = cosine_similarity
 
-    def compute_score(self, output, expected_output):
-        cand_emb = self.scorer.encode(output)
-        ref_emb = self.scorer.encode(expected_output)
-        scores = self._cos(cand_emb, ref_emb)
-        return scores
+    def _compute_score_output_expected_pairs(self, outputs, expected_outputs):
+        cand_emb = self.scorer.encode(outputs)
+        ref_emb = self.scorer.encode(expected_outputs)
+        return self.scorer.similarity_pairwise(cand_emb, ref_emb).tolist()
 
 ###############################################################################
 # Compression Metrics
