@@ -3,6 +3,9 @@ runs/
 runs*/
 runs*.zip
 
+# Figures
+figs/
+
 
 outcmaes/
 all-logs/
