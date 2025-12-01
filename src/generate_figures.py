@@ -41,9 +41,9 @@ NICE_NAME = {
 }
 
 COLOR_MAP = {
-    "In-Context Learning": "#1f77b4",
-    "Zero-Shot Learning": "#d62728",
-    "EvolLoRA RL": "#2ca02c"
+    NICE_NAME['marius']: "#1f77b4",
+    NICE_NAME['karim']: "#d62728",
+    NICE_NAME['li']: "#2ca02c"
 }
 
 
@@ -354,6 +354,8 @@ def load_single(runs_dir: Path, version: str):
         run_folders = discover_runs(runs_dir)
     elif version == 'karim':
         run_folders = discover_runs_karim(runs_dir)
+    elif version == 'li':
+        run_folders = discover_runs(runs_dir)
     else:
         raise ValueError(f"Unknown version: {version}")
 
@@ -366,6 +368,8 @@ def load_single(runs_dir: Path, version: str):
                 initial_prompt, model_name, events = load_run(rf)
             elif version == 'karim':
                 initial_prompt, model_name, events = load_run_karim(rf)
+            elif version == 'li':
+                initial_prompt, model_name, events = load_run(rf)
         except Exception as e:
             # print(f"Skipping {rf} due to error: {e}")
             continue
@@ -388,7 +392,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs-dir", type=str, default="../runs")
     parser.add_argument("--out_folder", type=str, default="../figs")
-    parser.add_argument("--versions", type=str, default=["marius", 'karim'], nargs='+',
+    parser.add_argument("--versions", type=str, default=["marius", 'karim', 'li'], nargs='+',
                         choices=['marius', 'karim', 'li'])
     args = parser.parse_args()
     main(args)
