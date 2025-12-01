@@ -45,7 +45,7 @@ class PPOConfig:
     entropy_coef: float = 0.01
     max_grad_norm: float = 0.5
 
-    max_new_tokens: int = 100
+    max_new_tokens: int = 30000
     temperature: float = 0.8
     top_p: float = 0.9
 
@@ -205,28 +205,52 @@ class PromptCompressionPPO:
         return_log_probs: bool = False,
         deterministic: bool = False
     ) -> Tuple[str, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        feedback_context = ""
+        aggressive_instruction = "Remove filler words. Use imperative mood."
+        
         if self.last_feedback and self.iteration > 0:
-            formatted_prompt = f"""Task: Compress the following prompt while preserving its meaning.
+            feedback_context = f"\nFEEDBACK FROM LAST ATTEMPT:\n{self.last_feedback}"
 
-Original Prompt: {prompt}
+            if "minimal compression" in self.last_feedback.lower():
+                aggressive_instruction = "Your last attempt was too long. You MUST cut at least 30% of the words. Use symbols (&, ->) and remove all articles (the, a)."
+            elif "semantic preservation" in self.last_feedback.lower() and "poor" in self.last_feedback.lower():
+                aggressive_instruction = "Your last attempt lost too much meaning. Keep specific constraints and entities, but shorten the grammar."
 
-Previous Attempt Feedback:
-{self.last_feedback}
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a Prompt Compression Specialist. Your goal is to shorten prompts "
+                    "while retaining their semantic instruction. "
+                    "1. Remove politeness and filler words. "
+                    "2. Use symbols (=, >, &) to replace words. "
+                    "3. Merge instructions. "
+                    "4. Output ONLY the compressed text."
+                )
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Original Prompt:\n{prompt}\n"
+                    f"{feedback_context}\n\n"
+                    f"Task: Rewrite the prompt above to be shorter but functionally equivalent.\n"
+                    f"Constraint: {aggressive_instruction}\n"
+                    f"Compressed Prompt:"
+                )
+            }
+        ]
 
-Taking this feedback into account, provide an improved compressed version:
-
-Compressed Prompt:"""
-        else:
-            formatted_prompt = f"""Task: Compress the following prompt while preserving its meaning.
-
-Original Prompt: {prompt}
-
-Compressed Prompt:"""
+        text_input = self.tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True
+        )
         
         inputs = self.tokenizer(
-            formatted_prompt, 
+            text_input, 
             return_tensors="pt", 
-            padding=True
+            padding=True,
+            truncation=True
         ).to(self.device)
 
         if deterministic:
