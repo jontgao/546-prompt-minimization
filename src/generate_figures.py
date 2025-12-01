@@ -41,9 +41,9 @@ NICE_NAME = {
 }
 
 COLOR_MAP = {
-    "In-Context Learning": "#1f77b4",
-    "Zero-Shot Learning": "#d62728",
-    "EvolLoRA RL": "#2ca02c"
+    NICE_NAME['marius']: "#1f77b4",
+    NICE_NAME['karim']: "#d62728",
+    NICE_NAME['li']: "#2ca02c"
 }
 
 
@@ -54,13 +54,14 @@ def safe_float(val):
         return math.inf
 
 
-def densify_history(milestones: List[Dict], max_iter: int = 15) -> Tuple[np.array, np.array]:
+def densify_history(milestones: List[Dict], max_iter: int = 15) -> Tuple[np.array, np.array, np.ndarray]:
     """
     Returns dense arrays for (Objective Score, Compression Score).
     Forward-fills the best value found so far.
     """
     dense_obj = np.full(max_iter + 1, np.nan)
     dense_comp = np.full(max_iter + 1, np.nan)
+    dense_bert = np.full(max_iter + 1, np.nan)
 
     dense_obj[0] = 0.5
     dense_comp[0] = 0.5
@@ -71,11 +72,12 @@ def densify_history(milestones: List[Dict], max_iter: int = 15) -> Tuple[np.arra
     sorted_evs = sorted(milestones, key=lambda x: int(x.get('iteration', 0)))
 
     if not sorted_evs:
-        return dense_obj, dense_comp
+        return dense_obj, dense_comp, dense_bert
 
     # Do nothing
     current_best_obj = 0.5
     current_best_comp = 0.5
+    current_best_bert = np.inf
 
     # We need to track the 'current state' to fill forward
     milestone_idx = 0
@@ -93,14 +95,20 @@ def densify_history(milestones: List[Dict], max_iter: int = 15) -> Tuple[np.arra
                 current_best_obj = sc
 
             # 2. Update Compression Score
-            # Note: Sometimes 'scores' dict exists, sometimes it's direct. Adjust based on log format.
-            # Assuming structure is ev['scores']['compression'] or similar
             raw_comp = ev.get('scores', {}).get('compression', math.inf)
             sc_comp = safe_float(raw_comp)
 
             # If strictly better compression found
             if sc_comp < current_best_comp:
                 current_best_comp = sc_comp
+
+            # 2. Update Bert Score
+            raw_bert = ev.get('scores', {}).get('bert', math.inf)
+            sc_bert = safe_float(raw_bert)
+
+            # If strictly better compression found
+            if sc_bert < current_best_bert:
+                current_best_bert = sc_bert
 
             milestone_idx += 1
 
@@ -111,7 +119,12 @@ def densify_history(milestones: List[Dict], max_iter: int = 15) -> Tuple[np.arra
         if current_best_comp != math.inf:
             dense_comp[step] = current_best_comp
 
-    return dense_obj, dense_comp
+        if current_best_bert != math.inf:
+            dense_bert[step] = current_best_bert
+
+    dense_bert = dense_bert[1:]
+
+    return dense_obj, dense_comp, dense_bert
 
 
 def generate_comparative_scatter(milestones: dict, out_folder: Path):
@@ -135,8 +148,8 @@ def generate_comparative_scatter(milestones: dict, out_folder: Path):
                 if not qwen_evs or not llama_evs:
                     continue
 
-                _, qwen_comp_hist = densify_history(qwen_evs)
-                _, llama_comp_hist = densify_history(llama_evs)
+                _, qwen_comp_hist, qwen_bert_hist = densify_history(qwen_evs)
+                _, llama_comp_hist, llama_bert_hist = densify_history(llama_evs)
 
                 # Take the value at the final iteration (index 15)
                 # If NaN (run failed/empty), skip
@@ -144,7 +157,9 @@ def generate_comparative_scatter(milestones: dict, out_folder: Path):
                     aligned_data.append({
                         "Method": method_name,
                         "Qwen_Compression": qwen_comp_hist[-1],
-                        "Llama_Compression": llama_comp_hist[-1]
+                        "Llama_Compression": llama_comp_hist[-1],
+                        "Qwen_BERT": 1 - qwen_bert_hist[-1],
+                        "Llama_BERT": 1 - llama_bert_hist[-1]
                     })
 
     if not aligned_data:
@@ -153,51 +168,59 @@ def generate_comparative_scatter(milestones: dict, out_folder: Path):
 
     df = pd.DataFrame(aligned_data)
 
-    # 2. Plotting
-    fig, ax = plt.subplots(figsize=(7, 7))
+    for plot_type in ["Compression", "BERT"]:
+        # 2. Plotting
+        fig, ax = plt.subplots(figsize=(7, 7))
 
-    # Scatter points
-    sns.scatterplot(
-        data=df,
-        x="Llama_Compression",
-        y="Qwen_Compression",
-        hue="Method",
-        style="Method",
-        palette=COLOR_MAP,
-        s=100,
-        alpha=0.8,
-        ax=ax
-    )
+        # Scatter points
+        sns.scatterplot(
+            data=df,
+            x=f"Llama_{plot_type}",
+            y=f"Qwen_{plot_type}",
+            hue="Method",
+            style="Method",
+            palette=COLOR_MAP,
+            s=100,
+            alpha=0.8,
+            ax=ax
+        )
 
-    # Diagonal Line (x=y)
-    lims = [
-        np.min([ax.get_xlim(), ax.get_ylim()]),  # min of both axes
-        np.max([ax.get_xlim(), ax.get_ylim()]),  # max of both axes
-    ]
-    ax.plot(lims, lims, 'k--', alpha=0.5, zorder=0, label="Equal Performance")
+        # Diagonal Line (x=y)
+        lims = [
+            np.min([ax.get_xlim(), ax.get_ylim()]),  # min of both axes
+            np.max([ax.get_xlim(), ax.get_ylim()]),  # max of both axes
+        ]
+        ax.plot(lims, lims, 'k--', alpha=0.5, zorder=0, label="Equal Performance")
 
-    ax.set_ylim(bottom=0)
-    ax.set_xlim(left=0)
+        ax.set_ylim(bottom=max(0, ax.get_ylim()[0]))
+        ax.set_xlim(left=max( 0, ax.get_xlim()[0]))
 
-    ax.legend()
+        ax.legend()
 
-    # Annotations
-    ax.text(0.55, 0.4, "Qwen Better\n(More Compression)", transform=ax.transAxes,
-            ha="left", va="top", fontsize=10, color="gray", fontweight='bold')
-    ax.text(0.3, 0.75, "Llama Better\n(More Compression)", transform=ax.transAxes,
-            ha="left", va="top", fontsize=10, color="gray", fontweight='bold')
+        if plot_type == "Compression":
+            # Annotations
+            ax.text(0.65, 0.4, "Qwen Better\n(More Compression)", transform=ax.transAxes,
+                    ha="center", va="top", fontsize=10, color="gray", fontweight='bold')
+            ax.text(0.4, 0.75, "Llama Better\n(More Compression)", transform=ax.transAxes,
+                    ha="center", va="top", fontsize=10, color="gray", fontweight='bold')
+        else:
+            ax.text(0.65, 0.9, "Qwen Better\n(Closer Semantics)", transform=ax.transAxes,
+                    ha="center", va="top", fontsize=10, color="gray", fontweight='bold')
+            ax.text(0.55, 0.2, "Llama Better\n(Closer Semantics)", transform=ax.transAxes,
+                    ha="center", va="top", fontsize=10, color="gray", fontweight='bold')
 
-    ax.set_aspect('equal')
-    ax.set_xlabel(f"Llama 3.1 (8B) Compression Score")
-    ax.set_ylabel(f"Qwen 2.5 (32B) Compression Score")
-    ax.set_title("Head-to-Head: Final Compression Ratio", fontweight='bold')
+        ax.set_aspect('equal')
+        ax.set_xlabel(f"Llama 3.1 (8B) {plot_type} Score")
+        ax.set_ylabel(f"Qwen 2.5 (32B) {plot_type} Score")
+        ax.set_title(f"Head-to-Head: Final {plot_type} Ratio", fontweight='bold')
 
-    # Save
-    plt.tight_layout()
-    plt.savefig(out_folder / "comparison_scatter_qwen_vs_llama.pdf", bbox_inches='tight')
-    plt.savefig(out_folder / "comparison_scatter_qwen_vs_llama.png", dpi=DPI, bbox_inches='tight')
-    print(f"Generated comparison scatter plot.")
-    plt.close()
+        # Save
+        plt.tight_layout()
+        plt.savefig(out_folder / f"comparison_scatter_qwen_vs_llama_{plot_type.lower()}.pdf", bbox_inches='tight')
+        plt.savefig(out_folder / f"comparison_scatter_qwen_vs_llama_{plot_type.lower()}.png", dpi=DPI,
+                    bbox_inches='tight')
+        print(f"Generated comparison scatter plot.")
+        plt.close()
 
 
 def generate_comparative_trajectory(data_by_model: dict, out_folder: Path):
@@ -260,7 +283,7 @@ def generate_figures(milestones: dict, out_folder: Path):
             for model_name, events in models_data.items():
                 if not events:
                     continue
-                dense_scores, dense_compression = densify_history(events, max_iter=15)
+                dense_scores, dense_compression, _ = densify_history(events, max_iter=15)
 
                 # Store if valid
                 if not np.all(np.isnan(dense_scores)):
@@ -369,7 +392,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs-dir", type=str, default="../runs")
     parser.add_argument("--out_folder", type=str, default="../figs")
-    parser.add_argument("--versions", type=str, default=["marius", 'karim'], nargs='+',
+    parser.add_argument("--versions", type=str, default=["marius", 'karim', 'li'], nargs='+',
                         choices=['marius', 'karim', 'li'])
     args = parser.parse_args()
     main(args)

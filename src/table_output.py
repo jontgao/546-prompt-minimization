@@ -224,6 +224,7 @@ def make_float_for_prompt(prompt: str,
         temp = 0
     else:
         sec = 'rl'
+        temp = 0
 
     lines.append(("\n\\hfill\n").join(column_blocks))
     lines.append(r"\vspace{6pt}")
@@ -241,6 +242,8 @@ def main(runs_dir: Path, out_file: Path, version: str):
         run_folders = discover_runs(runs_dir)
     elif version == 'karim':
         run_folders = discover_runs_karim(runs_dir)
+    elif version == 'li':
+        run_folders = discover_runs(runs_dir)
     else:
         raise ValueError(f"Unknown version: {version}")
 
@@ -307,6 +310,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate running-best milestone LaTeX (two-column) from runs/")
     parser.add_argument("--runs-dir", type=str, default="../runs", help="Top-level runs directory")
     parser.add_argument("--out", type=str, default="running_best_milestones", help="Output .tex file")
-    parser.add_argument("--version", type=str, default="marius", choices=['marius', 'karim', 'li'])
+    parser.add_argument("--versions", type=str, default=["marius", 'karim', 'li'], nargs='+',
+                        choices=['marius', 'karim', 'li'])
     args = parser.parse_args()
-    main(Path(args.runs_dir + "_" + args.version), Path(args.out + "_" + args.version + '.tex'), args.version)
+
+    for version in args.versions:
+        main(Path(args.runs_dir + "_" + version), Path(args.out + "_" + version + '.tex'), version)
