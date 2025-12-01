@@ -439,19 +439,24 @@ Compressed Prompt:"""
     
     def ppo_update(self, buffer: ExperienceBuffer):
         data = buffer.get()
-        
+
         old_log_probs = data['log_probs'].to(self.device).detach()
         old_values = data['values'].to(self.device).detach()
         rewards = data['rewards'].to(self.device)
         dones = data['dones'].to(self.device)
 
-        advantages, returns = self.compute_advantages(rewards, old_values, dones)
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        with torch.cuda.amp.autocast(enabled=False):
+            rewards_f32 = rewards.float()
+            old_values_f32 = old_values.float()
+            dones_f32 = dones.float()
+            
+            advantages, returns = self.compute_advantages(rewards_f32, old_values_f32, dones_f32)
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         for _ in range(self.config.ppo_epochs):
             new_log_probs = []
             new_values = []
-            
+
             for prompt, response in zip(data['prompts'], data['responses']):
                 log_prob, value = self.compute_log_probs_and_values(prompt, response)
                 new_log_probs.append(log_prob)
@@ -460,37 +465,59 @@ Compressed Prompt:"""
             new_log_probs = torch.stack(new_log_probs)
             new_values = torch.stack(new_values)
 
-            if advantages.dtype != new_log_probs.dtype:
-                advantages = advantages.to(new_log_probs.dtype)
-            if returns.dtype != new_values.dtype:
-                returns = returns.to(new_values.dtype)
-            if old_log_probs.dtype != new_log_probs.dtype:
-                old_log_probs = old_log_probs.to(new_log_probs.dtype)
+            with torch.cuda.amp.autocast(enabled=False):
+                adv_f32 = advantages.float()
+                ret_f32 = returns.float()
 
-            ratio = torch.exp(new_log_probs - old_log_probs)
-            surr1 = ratio * advantages
-            surr2 = torch.clamp(ratio, 1 - self.config.clip_range, 1 + self.config.clip_range) * advantages
-            policy_loss = -torch.min(surr1, surr2).mean()
+                min_len = min(new_log_probs.shape[0], old_log_probs.shape[0])
+                new_log_probs = new_log_probs[:min_len].float()
+                old_log_probs = old_log_probs[:min_len].float()
+                new_values = new_values[:min_len].float()
+                adv_f32 = adv_f32[:min_len]
+                ret_f32 = ret_f32[:min_len]
 
-            value_loss = F.mse_loss(new_values, returns)
+                ratio = torch.exp(new_log_probs - old_log_probs)
+                
+                surr1 = ratio * adv_f32
+                surr2 = torch.clamp(ratio, 1 - self.config.clip_range, 1 + self.config.clip_range) * adv_f32
+                
+                policy_loss = -torch.min(surr1, surr2).mean()
+                value_loss = F.mse_loss(new_values, ret_f32)
+                entropy = -(new_log_probs * torch.exp(new_log_probs)).mean()
 
-            entropy = -(new_log_probs * torch.exp(new_log_probs)).mean()
+                loss = (
+                    policy_loss + 
+                    self.config.value_loss_coef * value_loss - 
+                    self.config.entropy_coef * entropy
+                )
 
-            loss = (
-                policy_loss + 
-                self.config.value_loss_coef * value_loss - 
-                self.config.entropy_coef * entropy
-            )
+            if torch.isnan(loss) or torch.isinf(loss):
+                print("Warning: Loss is NaN/Inf. Skipping step.")
+                self.optimizer.zero_grad()
+                continue
 
             self.optimizer.zero_grad()
             loss.backward()
+
             torch.nn.utils.clip_grad_norm_(
                 list(self.model.parameters()) + list(self.value_head.parameters()),
                 self.config.max_grad_norm
             )
-            self.optimizer.step()
-            self.scheduler.step()
-        
+
+            grad_ok = True
+            for param in self.model.parameters():
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        grad_ok = False
+                        break
+            
+            if grad_ok:
+                self.optimizer.step()
+                self.scheduler.step()
+            else:
+                print("Warning: Gradients contain NaN/Inf. Skipping step to save model weights.")
+                self.optimizer.zero_grad()
+
         return {
             'policy_loss': policy_loss.item(),
             'value_loss': value_loss.item(),
@@ -609,7 +636,7 @@ Compressed Prompt:"""
 
 if __name__ == "__main__":
     config = PPOConfig(
-        model_name="meta-llama/Llama-3.1-8B-Instruct",
+        model_name="Qwen/Qwen2.5-32B-Instruct-AWQ",
         num_iterations=15,
         batch_size=4,
         output_dir="../runs_li"
