@@ -6,13 +6,14 @@ from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 import os
+import gc
 
 from transformers import (
     AutoModelForCausalLM, 
     AutoTokenizer,
     get_linear_schedule_with_warmup
 )
-# really really not a good idea but makes AWQ work?
+
 try:
     import transformers.activations
     if not hasattr(transformers.activations, "PytorchGELUTanh"):
@@ -21,7 +22,6 @@ except ImportError:
     pass
 
 from peft import LoraConfig, get_peft_model, TaskType
-
 from metrics import BERTScoreScorer, CompressionLengthScorer
 
 
@@ -32,7 +32,7 @@ class PPOConfig:
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
-    target_modules: List[str] = None  # Will default to ["q_proj", "v_proj"]
+    target_modules: List[str] = None
 
     batch_size: int = 4
     mini_batch_size: int = 2
@@ -46,6 +46,7 @@ class PPOConfig:
     max_grad_norm: float = 0.5
 
     max_new_tokens: int = 30000
+    task_max_new_tokens: int = 30000
     temperature: float = 0.8
     top_p: float = 0.9
 
@@ -66,16 +67,18 @@ class PPOConfig:
 class ExperienceBuffer:
     def __init__(self):
         self.prompts = []
-        self.responses = []
+        self.compressed_prompts = []
+        self.task_responses = []
         self.log_probs = []
         self.values = []
         self.rewards = []
         self.dones = []
         self.feedback = []
     
-    def add(self, prompt, response, log_prob, value, reward, feedback="", done=False):
+    def add(self, prompt, compressed_prompt, task_response, log_prob, value, reward, feedback="", done=False):
         self.prompts.append(prompt)
-        self.responses.append(response)
+        self.compressed_prompts.append(compressed_prompt)
+        self.task_responses.append(task_response)
         self.log_probs.append(log_prob)
         self.values.append(value)
         self.rewards.append(reward)
@@ -84,7 +87,8 @@ class ExperienceBuffer:
     
     def clear(self):
         self.prompts.clear()
-        self.responses.clear()
+        self.compressed_prompts.clear()
+        self.task_responses.clear()
         self.log_probs.clear()
         self.values.clear()
         self.rewards.clear()
@@ -94,7 +98,8 @@ class ExperienceBuffer:
     def get(self):
         return {
             'prompts': self.prompts,
-            'responses': self.responses,
+            'responses': self.compressed_prompts,
+            'task_responses': self.task_responses,
             'log_probs': torch.stack(self.log_probs),
             'values': torch.stack(self.values),
             'rewards': torch.tensor(self.rewards),
@@ -130,6 +135,7 @@ class PromptCompressionPPO:
         self.compression_scorer = CompressionLengthScorer()
 
         self._init_model()
+        self._generate_base_response()
 
         self.run_dir = self._create_run_dir()
 
@@ -181,9 +187,42 @@ class PromptCompressionPPO:
             num_warmup_steps=self.config.warmup_steps,
             num_training_steps=total_steps
         )
+
+    def _generate_base_response(self):        
+        with self.model.disable_adapter():
+            response = self._generate_task_output(self.initial_prompt)
+            
+        self.base_response = response
+
+    def _generate_task_output(self, prompt_text: str) -> str:
+        messages = [{"role": "user", "content": prompt_text}]
+        
+        text_input = self.tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True
+        )
+        
+        inputs = self.tokenizer(
+            text_input, 
+            return_tensors="pt", 
+            padding=True,
+            truncation=True
+        ).to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=self.config.task_max_new_tokens,
+                do_sample=False,
+                pad_token_id=self.tokenizer.pad_token_id
+            )
+            
+        generated_ids = outputs[0][inputs.input_ids.shape[1]:]
+        response = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        return response.strip()
     
     def _create_run_dir(self) -> Path:
-        """Create directory for this run."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         model_name = self.config.model_name.replace("/", "_")
         prompt_hash = hash(self.initial_prompt) % 10000
@@ -196,10 +235,13 @@ class PromptCompressionPPO:
 
         with open(run_dir / "initial_prompt.txt", "w") as f:
             f.write(self.initial_prompt)
+
+        with open(run_dir / "base_response.txt", "w") as f:
+            f.write(self.base_response)
         
         return run_dir
     
-    def generate_response(
+    def generate_compression_action(
         self, 
         prompt: str, 
         return_log_probs: bool = False,
@@ -327,6 +369,9 @@ Compressed Prompt:"""
         response_tokens = self.tokenizer.encode(response, add_special_tokens=False)
         prompt_len = inputs.input_ids.shape[1]
 
+        if prompt_len + len(response_tokens) > logits.shape[1] + 1:
+             response_tokens = response_tokens[:logits.shape[1] - prompt_len]
+
         response_logits = logits[0, prompt_len-1:prompt_len-1+len(response_tokens), :]
         log_probs = F.log_softmax(response_logits, dim=-1)
 
@@ -345,10 +390,10 @@ Compressed Prompt:"""
         
         return avg_log_prob, value
 
-    def compute_reward(self, compressed_prompt: str) -> Tuple[Dict[str, float], str]:
+    def compute_reward(self, compressed_prompt: str, task_response: str) -> Tuple[Dict[str, float], str]:
         semantic_score = self.semantic_scorer.compute_score(
-            compressed_prompt, 
-            self.initial_prompt
+            task_response,
+            self.base_response
         )
 
         compression_ratio = self.compression_scorer.compute_score(
@@ -390,47 +435,31 @@ Compressed Prompt:"""
         feedback_parts = []
 
         if semantic_score >= 0.9:
-            feedback_parts.append(f" Excellent semantic preservation (score: {semantic_score:.3f}). The meaning is well maintained.")
+            feedback_parts.append(f" Excellent semantic preservation (response match: {semantic_score:.3f}). The model executed the task identically.")
         elif semantic_score >= 0.75:
-            feedback_parts.append(f" Good semantic preservation (score: {semantic_score:.3f}), but some meaning may be lost.")
+            feedback_parts.append(f" Good semantic preservation (response match: {semantic_score:.3f}), but the output changed slightly.")
         elif semantic_score >= 0.6:
-            feedback_parts.append(f" Moderate semantic preservation (score: {semantic_score:.3f}). Important details are being lost.")
+            feedback_parts.append(f" Moderate semantic preservation (response match: {semantic_score:.3f}). The model gave a different answer.")
         else:
-            feedback_parts.append(f" Poor semantic preservation (score: {semantic_score:.3f}). Too much meaning has been lost.")
+            feedback_parts.append(f" Poor semantic preservation (response match: {semantic_score:.3f}). The model's answer is completely different from the baseline.")
 
         compression_pct = (1 - compression_ratio) * 100
         if compression_ratio < 0.5:
-            feedback_parts.append(f" Excellent compression ({compression_pct:.1f}% reduction, {compressed_len}/{original_len} chars).")
+            feedback_parts.append(f" Excellent compression ({compression_pct:.1f}% reduction).")
         elif compression_ratio < 0.7:
-            feedback_parts.append(f" Good compression ({compression_pct:.1f}% reduction, {compressed_len}/{original_len} chars).")
-        elif compression_ratio < 0.9:
-            feedback_parts.append(f" Modest compression ({compression_pct:.1f}% reduction, {compressed_len}/{original_len} chars). Can compress more.")
+            feedback_parts.append(f" Good compression ({compression_pct:.1f}% reduction).")
         else:
-            feedback_parts.append(f" Minimal compression ({compression_pct:.1f}% reduction, {compressed_len}/{original_len} chars). Compress more aggressively.")
+            feedback_parts.append(f" Minimal compression ({compression_pct:.1f}% reduction).")
 
-        if semantic_score >= 0.8 and compression_ratio < 0.6:
-            feedback_parts.append("→ Excellent balance! This is a high-quality compression.")
-        elif semantic_score < 0.7:
-            feedback_parts.append("→ Focus on preserving more of the original meaning and key details.")
-        elif compression_ratio > 0.8:
-            feedback_parts.append("→ Focus on being more concise. Remove redundant words and use shorter phrases.")
-        else:
-            feedback_parts.append("→ Try to improve both compression and semantic preservation.")
-        
         return " ".join(feedback_parts)
     
     def compute_advantages(self, rewards, values, dones):
         advantages = torch.zeros_like(rewards)
         last_advantage = 0
-
         dones_float = dones.float()
         
         for t in reversed(range(len(rewards))):
-            if t == len(rewards) - 1:
-                next_value = 0
-            else:
-                next_value = values[t + 1]
-            
+            next_value = 0 if t == len(rewards) - 1 else values[t + 1]
             delta = rewards[t] + self.config.gamma * next_value * (1 - dones_float[t]) - values[t]
             advantages[t] = last_advantage = delta + self.config.gamma * self.config.gae_lambda * (1 - dones_float[t]) * last_advantage
         
@@ -439,24 +468,19 @@ Compressed Prompt:"""
     
     def ppo_update(self, buffer: ExperienceBuffer):
         data = buffer.get()
-
+        
         old_log_probs = data['log_probs'].to(self.device).detach()
         old_values = data['values'].to(self.device).detach()
         rewards = data['rewards'].to(self.device)
         dones = data['dones'].to(self.device)
 
-        with torch.cuda.amp.autocast(enabled=False):
-            rewards_f32 = rewards.float()
-            old_values_f32 = old_values.float()
-            dones_f32 = dones.float()
-            
-            advantages, returns = self.compute_advantages(rewards_f32, old_values_f32, dones_f32)
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        advantages, returns = self.compute_advantages(rewards, old_values, dones)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         for _ in range(self.config.ppo_epochs):
             new_log_probs = []
             new_values = []
-
+            
             for prompt, response in zip(data['prompts'], data['responses']):
                 log_prob, value = self.compute_log_probs_and_values(prompt, response)
                 new_log_probs.append(log_prob)
@@ -465,63 +489,39 @@ Compressed Prompt:"""
             new_log_probs = torch.stack(new_log_probs)
             new_values = torch.stack(new_values)
 
-            with torch.cuda.amp.autocast(enabled=False):
-                adv_f32 = advantages.float()
-                ret_f32 = returns.float()
+            if advantages.dtype != new_log_probs.dtype:
+                advantages = advantages.to(new_log_probs.dtype)
+            if returns.dtype != new_values.dtype:
+                returns = returns.to(new_values.dtype)
+            if old_log_probs.dtype != new_log_probs.dtype:
+                old_log_probs = old_log_probs.to(new_log_probs.dtype)
 
-                min_len = min(new_log_probs.shape[0], old_log_probs.shape[0])
-                new_log_probs = new_log_probs[:min_len].float()
-                old_log_probs = old_log_probs[:min_len].float()
-                new_values = new_values[:min_len].float()
-                adv_f32 = adv_f32[:min_len]
-                ret_f32 = ret_f32[:min_len]
+            ratio = torch.exp(new_log_probs - old_log_probs)
+            surr1 = ratio * advantages
+            surr2 = torch.clamp(ratio, 1 - self.config.clip_range, 1 + self.config.clip_range) * advantages
+            policy_loss = -torch.min(surr1, surr2).mean()
 
-                ratio = torch.exp(new_log_probs - old_log_probs)
-                
-                surr1 = ratio * adv_f32
-                surr2 = torch.clamp(ratio, 1 - self.config.clip_range, 1 + self.config.clip_range) * adv_f32
-                
-                policy_loss = -torch.min(surr1, surr2).mean()
-                value_loss = F.mse_loss(new_values, ret_f32)
-                entropy = -(new_log_probs * torch.exp(new_log_probs)).mean()
+            value_loss = F.mse_loss(new_values, returns)
+            entropy = -(new_log_probs * torch.exp(new_log_probs)).mean()
 
-                loss = (
-                    policy_loss + 
-                    self.config.value_loss_coef * value_loss - 
-                    self.config.entropy_coef * entropy
-                )
-
-            if torch.isnan(loss) or torch.isinf(loss):
-                print("Warning: Loss is NaN/Inf. Skipping step.")
-                self.optimizer.zero_grad()
-                continue
+            loss = (
+                policy_loss + 
+                self.config.value_loss_coef * value_loss - 
+                self.config.entropy_coef * entropy
+            )
 
             self.optimizer.zero_grad()
             loss.backward()
-
             torch.nn.utils.clip_grad_norm_(
                 list(self.model.parameters()) + list(self.value_head.parameters()),
                 self.config.max_grad_norm
             )
-
-            grad_ok = True
-            for param in self.model.parameters():
-                if param.grad is not None:
-                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                        grad_ok = False
-                        break
-            
-            if grad_ok:
-                self.optimizer.step()
-                self.scheduler.step()
-            else:
-                print("Warning: Gradients contain NaN/Inf. Skipping step to save model weights.")
-                self.optimizer.zero_grad()
-
+            self.optimizer.step()
+            self.scheduler.step()
+        
         return {
             'policy_loss': policy_loss.item(),
             'value_loss': value_loss.item(),
-            'entropy': entropy.item(),
             'total_loss': loss.item()
         }
     
@@ -529,18 +529,26 @@ Compressed Prompt:"""
         buffer = ExperienceBuffer()
 
         iteration_feedbacks = []
+        iteration_task_responses = []
+
         for _ in range(self.config.batch_size):
-            compressed, log_prob, value = self.generate_response(
+            compressed_prompt, log_prob, value = self.generate_compression_action(
                 self.initial_prompt, 
                 return_log_probs=True
             )
             
-            reward_dict, feedback = self.compute_reward(compressed)
+            with self.model.disable_adapter():
+                task_response = self._generate_task_output(compressed_prompt)
+            
+            iteration_task_responses.append(task_response)
+
+            reward_dict, feedback = self.compute_reward(compressed_prompt, task_response)
             iteration_feedbacks.append(feedback)
             
             buffer.add(
                 prompt=self.initial_prompt,
-                response=compressed,
+                compressed_prompt=compressed_prompt,
+                task_response=task_response,
                 log_prob=log_prob,
                 value=value,
                 reward=reward_dict['total'],
@@ -551,15 +559,18 @@ Compressed Prompt:"""
         loss_dict = self.ppo_update(buffer)
 
         best_idx = torch.argmax(torch.tensor(buffer.rewards)).item()
-        best_compressed = buffer.responses[best_idx]
+        best_compressed = buffer.compressed_prompts[best_idx]
+        best_task_response = buffer.task_responses[best_idx]
         best_feedback = iteration_feedbacks[best_idx]
-        best_reward_dict, _ = self.compute_reward(best_compressed)
+        best_reward_dict, _ = self.compute_reward(best_compressed, best_task_response)
 
         self.last_feedback = best_feedback
         
         milestone = {
             'iteration': self.iteration,
             'compressed_prompt': best_compressed,
+            'task_response': best_task_response,
+            'base_response_snippet': self.base_response[:100],
             'score': 1.0 - best_reward_dict['total'],
             'scores': {
                 'semantic': float(best_reward_dict['semantic']),
@@ -573,10 +584,9 @@ Compressed Prompt:"""
         self.milestones.append(milestone)
         self._save_milestone(milestone)
         
-        print(f"Iteration {self.iteration}: Score={milestone['score']:.4f}, "
-              f"Compression={best_reward_dict['compression']:.4f}, "
-              f"Semantic={best_reward_dict['semantic']:.4f}")
-        print(f"Feedback: {best_feedback}")
+        print(f"Iteration {self.iteration}: Reward={best_reward_dict['total']:.4f}, "
+              f"Comp={best_reward_dict['compression']:.4f}, "
+              f"Sem(Resp)={best_reward_dict['semantic']:.4f}")
         
         self.iteration += 1
         buffer.clear()
@@ -589,14 +599,8 @@ Compressed Prompt:"""
     def save_checkpoint(self):
         checkpoint_dir = self.run_dir / f"checkpoint_{self.iteration}"
         checkpoint_dir.mkdir(exist_ok=True)
-
         self.model.save_pretrained(checkpoint_dir)
-
-        torch.save(
-            self.value_head.state_dict(),
-            checkpoint_dir / "value_head.pt"
-        )
-        
+        torch.save(self.value_head.state_dict(), checkpoint_dir / "value_head.pt")
         print(f"Checkpoint saved to {checkpoint_dir}")
     
     def train(self):
@@ -605,7 +609,6 @@ Compressed Prompt:"""
         
         for iteration in range(self.config.num_iterations):
             self.train_iteration()
-            
             if (iteration + 1) % self.config.save_every == 0:
                 self.save_checkpoint()
 
@@ -614,37 +617,21 @@ Compressed Prompt:"""
 
         if self.milestones:
             best_milestone = max(self.milestones, key=lambda x: x['reward'])
-            
-            print("\n" + "="*50)
-            print("TRAINING COMPLETE - BEST RESULT")
-            print("="*50)
-            print(f"Iteration: {best_milestone['iteration']}")
-            print(f"Score: {best_milestone['score']:.4f} (Lower is better)")
-            print(f"Reward: {best_milestone['reward']:.4f}")
-            print(f"Compression Score: {best_milestone['scores']['compression']:.4f}")
-            print(f"Semantic Score: {best_milestone['scores']['semantic']:.4f}")
-            print("-"*20)
-            print(f"Original Prompt:\n{self.initial_prompt}")
-            print("-"*20)
-            print(f"Best Compressed Prompt:\n{best_milestone['compressed_prompt']}")
-            print("="*50 + "\n")
-
             best_result_path = self.run_dir / "best_result.json"
             with open(best_result_path, "w") as f:
                 json.dump(best_milestone, f, indent=2)
-            print(f"Best result details saved to {best_result_path}")
 
 if __name__ == "__main__":
     config = PPOConfig(
-        model_name="Qwen/Qwen2.5-32B-Instruct-AWQ",
+        model_name="meta-llama/Llama-3.1-8B-Instruct",
         num_iterations=15,
         batch_size=4,
         output_dir="../runs_li"
     )
-    
+
     with open('../data/long_prompts.json', 'r') as f:
         prompts = json.load(f)
-
+ 
     for prompt in prompts:
         print(f"Compressing: {prompt}")
         trainer = PromptCompressionPPO(
@@ -654,4 +641,8 @@ if __name__ == "__main__":
         
         trainer.train()
 
-    print(f"Training complete! Check {trainer.run_dir} for results")
+        del trainer
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    print(f"Training complete! Check {config.run_dir} for results")
