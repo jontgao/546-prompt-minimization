@@ -10,7 +10,8 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
-from table_output import compute_milestones, load_run, load_run_karim, load_run_li, discover_runs, discover_runs_karim, discover_runs_li
+from table_output import compute_milestones, load_run, load_run_karim, load_run_li, discover_runs, discover_runs_karim, \
+    discover_runs_li
 
 # Define exact model keys as they appear in your data/logs
 MODEL_KEY_QWEN = "Qwen/Qwen2.5-32B-Instruct-AWQ"
@@ -37,7 +38,7 @@ def set_publication_style():
 NICE_NAME = {
     "marius": "In-Context Learning",
     "karim": "Zero-Shot Learning",
-    "li": "LoRA RL"
+    "li": "RL Fine-Tuning"
 }
 
 COLOR_MAP = {
@@ -168,6 +169,31 @@ def generate_comparative_scatter(milestones: dict, out_folder: Path):
 
     df = pd.DataFrame(aligned_data)
 
+    table_vals = []
+
+    for method_name in NICE_NAME.values():
+        print(f"{method_name} - Llama and Qwen:")
+
+        line = [method_name]
+
+        for pref in ['Llama', 'Qwen']:
+            vals = df[df['Method'] == method_name][[f"{pref}_Compression", f"{pref}_BERT"]]
+
+            for suff in ['_Compression', "_BERT"]:
+                key_name = f"{pref}{suff}"
+                key = vals[f"{pref}{suff}"]
+
+                rep = fr"{key.mean():.2f} $\pm$ {key.std():.2f}"
+
+                line.append(rep)
+
+                print(key_name, fr"{key.mean():.2f}  {key.std():.2f}")
+
+        table_vals.append(" & ".join(line) + r" \\")
+        print()
+
+    print('\n'.join(table_vals))
+
     for plot_type in ["Compression", "BERT"]:
         # 2. Plotting
         fig, ax = plt.subplots(figsize=(7, 7))
@@ -193,7 +219,7 @@ def generate_comparative_scatter(milestones: dict, out_folder: Path):
         ax.plot(lims, lims, 'k--', alpha=0.5, zorder=0, label="Equal Performance")
 
         ax.set_ylim(bottom=max(0, ax.get_ylim()[0]))
-        ax.set_xlim(left=max( 0, ax.get_xlim()[0]))
+        ax.set_xlim(left=max(0, ax.get_xlim()[0]))
 
         ax.legend()
 
@@ -371,7 +397,7 @@ def load_single(runs_dir: Path, version: str):
             elif version == 'li':
                 initial_prompt, model_name, events = load_run_li(rf)
         except Exception as e:
-            # print(f"Skipping {rf} due to error: {e}")
+            print(f"Skipping {rf} due to error: {e}")
             continue
         agg[initial_prompt][model_name].extend(events)
 
