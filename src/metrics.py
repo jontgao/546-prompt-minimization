@@ -71,7 +71,6 @@ class SentenceBERTCosineScorer(Scorer):
     def __init__(self, model='all-MiniLM-L6-v2'):
         from sentence_transformers import SentenceTransformer
         super().__init__(scorer=SentenceTransformer(model))
-        self._cos = cosine_similarity
 
     def _compute_score_output_expected_pairs(self, outputs, expected_outputs):
         cand_emb = self.scorer.encode(outputs)
