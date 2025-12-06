@@ -77,7 +77,6 @@ class SentenceBERTCosineScorer(Scorer):
         ref_emb = self.scorer.encode(expected_outputs)
         return self.scorer.similarity_pairwise(cand_emb, ref_emb).tolist()
 
-
 ###############################################################################
 # Compression Metrics
 ###############################################################################
