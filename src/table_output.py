@@ -95,10 +95,22 @@ def load_run_li(run_folder: Path) -> Tuple[str, str, List[Dict]]:
         config = json.load(f)
         model_name = config['model_name']
 
+        if model_name == 'Qwen/Qwen2.5-32B-Instruct':
+            model_name = 'Qwen/Qwen2.5-32B-Instruct-AWQ'
+
     events = []
     with open(run_folder / "milestones.jsonl", "r") as f:
         for line in f:
-            events.append(json.loads(line))
+            event = json.loads(line)
+
+            event['iteration'] += 1
+            event['scores'] = {
+                'bert': 1 - event['scores']['semantic'],
+                'compression': event['scores']['compression']
+            }
+            event['prompt'] = event['compressed_prompt']
+
+            events.append(event)
     
     return initial_prompt, model_name, events
 
@@ -183,9 +195,6 @@ def make_float_for_prompt(prompt: str,
         if not milestones:
             block.append(r"\small (no events)")
         else:
-            if milestones[0]['iteration'] == 0:
-                milestones.pop(0)
-
             block.append(r"\begin{flushleft}")
             block.append(r"\footnotesize")
             # List each milestone: iteration, score, prompt, output
@@ -224,12 +233,13 @@ def make_float_for_prompt(prompt: str,
         temp = 0
     else:
         sec = 'rl'
+        temp = 0.8
 
     lines.append(("\n\\hfill\n").join(column_blocks))
     lines.append(r"\vspace{6pt}")
     lines.append(
         fr"\caption{{\textbf{{Milestone Discoveries in Prompt Minimization.}} The top panel shows the verbose initial prompt. The bottom panels compare the minimization trajectory of Qwen-32B (Left) and Llama-3.1-8B (Right) using Algorithm from Section \ref{{sec:{sec}}}. Metrics indicate total score, BERT-score, and compression ratio. Running with Temperature {temp}.}}")
-    lines.append(r"\label{fig:milestones_" + str(abs(hash(prompt)) % (10 ** 8)) + r"}")
+    lines.append(r"\label{fig:milestones_" + str(abs(hash(prompt)) % (10 ** 8))+ "_" + version + r"}")
     lines.append(r"\end{figure*}")
     lines.append("\n")
     with out_path.open("a", encoding="utf-8") as f:
@@ -241,6 +251,8 @@ def main(runs_dir: Path, out_file: Path, version: str):
         run_folders = discover_runs(runs_dir)
     elif version == 'karim':
         run_folders = discover_runs_karim(runs_dir)
+    elif version == 'li':
+        run_folders = discover_runs_li(runs_dir)
     else:
         raise ValueError(f"Unknown version: {version}")
 
@@ -254,7 +266,7 @@ def main(runs_dir: Path, out_file: Path, version: str):
             elif version == 'karim':
                 initial_prompt, model_name, events = load_run_karim(rf)
             elif version == 'li':
-                initial_prompt, model_name, events = load_run_li(runs_dir)
+                initial_prompt, model_name, events = load_run_li(rf)
         except Exception as e:
             print(f"Skipping {rf} due to error: {e}")
             continue
@@ -265,6 +277,10 @@ def main(runs_dir: Path, out_file: Path, version: str):
         per_prompt_milestones[prompt] = {}
         for model, evs in model_map.items():
             milestones = compute_milestones(evs)
+
+            if milestones and milestones[0]['iteration'] == 0:
+                milestones.pop(0)
+
             per_prompt_milestones[prompt][model] = milestones
 
     # Write LaTeX document with twocolumn class (NeurIPS-like)
@@ -307,6 +323,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate running-best milestone LaTeX (two-column) from runs/")
     parser.add_argument("--runs-dir", type=str, default="../runs", help="Top-level runs directory")
     parser.add_argument("--out", type=str, default="running_best_milestones", help="Output .tex file")
-    parser.add_argument("--version", type=str, default="marius", choices=['marius', 'karim', 'li'])
+    parser.add_argument("--versions", type=str, default=['marius', 'karim','li'], nargs='+',
+                        choices=['marius', 'karim', 'li'])
     args = parser.parse_args()
-    main(Path(args.runs_dir + "_" + args.version), Path(args.out + "_" + args.version + '.tex'), args.version)
+
+    for version in args.versions:
+        main(Path(args.runs_dir + "_" + version), Path(args.out + "_" + version + '.tex'), version)
