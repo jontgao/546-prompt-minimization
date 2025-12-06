@@ -1,0 +1,5 @@
+{
+  "initial_prompt": "Summarize the abstract in 3 sentences: (1) problem, (2) method, (3) key result.",
+  "initial_output": "This work studies prompt minimization for LLMs. It proposes a staged search that shrinks prompts while preserving semantic fidelity. Experiments show large token savings with similar answer quality.",
+  "tokenizer_model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+}
