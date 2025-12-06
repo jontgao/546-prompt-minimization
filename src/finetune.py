@@ -631,8 +631,25 @@ if __name__ == "__main__":
 
     with open('../data/long_prompts.json', 'r') as f:
         prompts = json.load(f)
+
+    done = set()
+    filename = "initial_prompt.txt"
+    for dirpath, dirnames, filenames in os.walk("../runs_li"):
+        if filename in filenames:
+            file_path = os.path.join(dirpath, filename)
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    if content in done:
+                        print(f"Duplicate: {dirpath}")
+                    done.add(content)
+            except Exception as e:
+                print(f"Failed to read {file_path}: {e}")
  
     for prompt in prompts:
+        if prompt in done:
+            print("Skipping prompt")
+            continue
         print(f"Compressing: {prompt}")
         trainer = PromptCompressionPPO(
             config=config,
@@ -645,4 +662,4 @@ if __name__ == "__main__":
         gc.collect()
         torch.cuda.empty_cache()
 
-    print(f"Training complete! Check {config.run_dir} for results")
+    print(f"Training complete! Check {trainer.run_dir} for results")
