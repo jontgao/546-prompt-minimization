@@ -22,6 +22,11 @@ LATEX_SPECIALS = {
     '>': r'\textgreater{}',
 }
 
+NICE_NAME = {
+    "marius": "In-Context Learning",
+    "karim": "Zero-Shot Learning",
+    "li": "RL Fine-Tuning"
+}
 
 def latex_escape(s: str) -> str:
     if s is None:
@@ -157,10 +162,10 @@ def make_float_for_prompt(prompt: str,
     lines = []
     lines.append(r"\begin{figure*}[t]")
     lines.append(r'\centering')
-    lines.append(r"""\begin{tcolorbox}[
+    lines.append(fr"""\begin{{tcolorbox}}[
     colback=mygray, 
     colframe=gray!50!black, 
-    title=\textbf{Input: Initial Prompt}, 
+    title=\textbf{{{NICE_NAME[version]}: Initial Prompt}}, 
     fonttitle=\sffamily\small, 
     sharp corners=south,
     boxrule=0.5pt,
@@ -238,7 +243,7 @@ def make_float_for_prompt(prompt: str,
     lines.append(("\n\\hfill\n").join(column_blocks))
     lines.append(r"\vspace{6pt}")
     lines.append(
-        fr"\caption{{\textbf{{Milestone Discoveries in Prompt Minimization.}} The top panel shows the verbose initial prompt. The bottom panels compare the minimization trajectory of Qwen-32B (Left) and Llama-3.1-8B (Right) using Algorithm from Section \ref{{sec:{sec}}}. Metrics indicate total score, BERT-score, and compression ratio. Running with Temperature {temp}.}}")
+        fr"\caption{{\textbf{{Milestone Discoveries in Prompt Minimization using {NICE_NAME[version]}.}} The top panel shows the verbose initial prompt. The bottom panels compare the minimization trajectory of Qwen-32B (Left) and Llama-3.1-8B (Right) using Algorithm from Section \ref{{sec:{sec}}}. Metrics indicate total score, BERT-score, and compression ratio. Running with Temperature {temp}.}}")
     lines.append(r"\label{fig:milestones_" + str(abs(hash(prompt)) % (10 ** 8))+ "_" + version + r"}")
     lines.append(r"\end{figure*}")
     lines.append("\n")
